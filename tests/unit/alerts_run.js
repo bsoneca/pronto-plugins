@@ -1,7 +1,7 @@
 // pronto-alerts' driver (alerts/subscriber.ts) run once against a fake Pub/Sub pull endpoint and a fake phone, both on
 // localhost, with an inbox folder of its own: what the inbox held when each acknowledge arrived, which calls came in
 // what order, and what the phone was told. No network and no credentials: the token is a function that returns a word.
-import { pollOnce } from '../../alerts/subscriber.ts';
+import { exists, pollOnce } from '../../alerts/subscriber.ts';
 
 // A message as :pull returns it: the incident as Cloud Monitoring publishes it, in base64.
 export const message = (id, incident) => ({ messageId: id, data: btoa(JSON.stringify(incident)) });
@@ -66,4 +66,20 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
   const files = Object.fromEntries([...Deno.readDirSync(dir)].map((f) => [f.name, Deno.readTextFileSync(`${dir}/${f.name}`)]));
   Deno.removeSync(dir, { recursive: true });
   return { errors, files, results, calls, inboxAtAck, told, tokens, inbox: text.split('\n').filter(Boolean).map((l) => JSON.parse(l)), raw: text, heartbeat };
+}
+
+// `exists` on a path below a file (NotADirectory) or below a directory nobody may enter (a permission error): the first is missing, the second is
+// not, and is said.
+export function existence() {
+  const dir = Deno.makeTempDirSync({ prefix: 'alerts-exists-' });
+  Deno.writeTextFileSync(`${dir}/file`, 'x');
+  Deno.mkdirSync(`${dir}/locked`);
+  Deno.writeTextFileSync(`${dir}/locked/in`, 'x');
+  Deno.chmodSync(`${dir}/locked`, 0o000);
+  let said = null;
+  try { exists(`${dir}/locked/in`); } catch (e) { said = e.name; }
+  Deno.chmodSync(`${dir}/locked`, 0o700);
+  const r = { there: exists(`${dir}/file`), absent: exists(`${dir}/none`), belowFile: exists(`${dir}/file/x`), said };
+  Deno.removeSync(dir, { recursive: true });
+  return r;
 }

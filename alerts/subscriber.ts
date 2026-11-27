@@ -34,13 +34,13 @@ export type Options = {
 };
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
-// Only a path that is not there is missing: any other error (permissions, I/O) is the caller's to see.
-const exists = (p: string) => {
+// Only a path that is not there (or whose parent is no directory) is missing: any other error (permissions, I/O) is the caller's to see.
+export const exists = (p: string) => {
   try {
     Deno.statSync(p);
     return true;
   } catch (e) {
-    if (e instanceof Deno.errors.NotFound) return false;
+    if (e instanceof Deno.errors.NotFound || e instanceof Deno.errors.NotADirectory) return false;
     throw e;
   }
 };
@@ -168,7 +168,7 @@ function gcloudToken() {
   let held = "";
   return async (refresh = false) => {
     if (!held || refresh) {
-      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "piped" }).output();
+      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token", "--verbosity=error"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "piped" }).output();
       const token = new TextDecoder().decode(r.stdout).trim();
       if (!r.success || !token) throw new Error(`gcloud printed no access token for the pronto configuration (exit ${r.code}): ${tailOf(new TextDecoder().decode(r.stderr))}`);
       held = token;
@@ -220,34 +220,38 @@ if (import.meta.main) {
     const repo = sh("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], apps[0]);
     const cache = `${home}/.cache/pronto/alerts`;
     const wt = `${cache}/wt`;
-    Deno.mkdirSync(cache, { recursive: true });
-    sh("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
-    if (!exists(`${wt}/.git`)) sh("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, "origin/main"]);
-    sh("git", ["checkout", "-q", "--detach", "-f", "origin/main"], wt);
-    sh("git", ["clean", "-ffdq"], wt);
-    const hosts = new Set(["pubsub.googleapis.com"]);
-    for (const r of rels) {
-      for (const f of ["alerts/subscriber.ts", "observability/alerts.subscriber.json"]) {
-        if (!exists(`${wt}/${r}/${f}`)) throw new Error(`${r}/${f} is not on origin/main yet: merge the app's alerts first`);
-      }
-      const ntfy = read(`${wt}/${r}`).ntfy;
-      if (ntfy) hosts.add(new URL(ntfy.url).host);
-    }
+    // Everything that can fail without changing anything comes first: a failed install must not move the code of the job
+    // that is running (its worktree), nor its plist.
     // gcloud by its real absolute path, found now: the job's PATH names none, and a mise shim is the mise binary itself,
     // which finds the tool by the working directory (`mise which`, not the shim, names the one the shim would run).
     const found = (Deno.env.get("PATH") ?? "").split(":").map((d) => `${d}/gcloud`).find((p) => p.startsWith("/") && exists(p));
     if (!found) throw new Error("gcloud is not on the PATH: the job cannot fetch a token");
     let gcloudAt = Deno.realPathSync(found);
-    if (gcloudAt.split("/").pop() === "mise") gcloudAt = Deno.realPathSync(sh(gcloudAt, ["which", "gcloud"]));
+    if (gcloudAt.split("/").pop() === "mise") gcloudAt = Deno.realPathSync(sh(gcloudAt, ["which", "gcloud"], apps[0]));
     if (gcloudAt.split("/").pop() === "mise") throw new Error(`${found} is a mise shim that names no gcloud: install it, or put the real one on the PATH`);
     const env = jobEnv({ env: Deno.env.toObject(), os: Deno.build.os, home, gcloud: gcloudAt });
     // One token, fetched with the job's exact environment before the job is installed: a job that cannot fetch one
     // would only fail in its log, long after. The token is dropped unread; what is said of a failure is gcloud's
     // last lines of stderr.
     {
-      const r = new Deno.Command(gcloudAt, { args: ["auth", "print-access-token"], clearEnv: true, env, stdout: "piped", stderr: "piped" }).outputSync();
+      const r = new Deno.Command(gcloudAt, { args: ["auth", "print-access-token", "--verbosity=error"], clearEnv: true, env, stdout: "piped", stderr: "piped" }).outputSync();
       if (!r.success || !new TextDecoder().decode(r.stdout).trim()) throw new Error(`gcloud cannot print an access token with the job's environment (exit ${r.code}): ${tailOf(new TextDecoder().decode(r.stderr))}`);
     }
+    // origin/main is fetched (which moves no worktree) and the apps' files are read from it before the worktree is.
+    sh("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
+    const hosts = new Set(["pubsub.googleapis.com"]);
+    for (const r of rels) {
+      for (const f of ["alerts/subscriber.ts", "observability/alerts.subscriber.json"]) {
+        const at = `origin/main:${r}/${f}`;
+        if (!new Deno.Command("git", { args: ["--git-dir", repo, "cat-file", "-e", at], stdout: "null", stderr: "null" }).outputSync().success) throw new Error(`${r}/${f} is not on origin/main yet: merge the app's alerts first`);
+      }
+      const ntfy = JSON.parse(sh("git", ["--git-dir", repo, "show", `origin/main:${r}/observability/alerts.subscriber.json`])).ntfy;
+      if (ntfy) hosts.add(new URL(ntfy.url).host);
+    }
+    Deno.mkdirSync(cache, { recursive: true });
+    if (!exists(`${wt}/.git`)) sh("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, "origin/main"]);
+    sh("git", ["checkout", "-q", "--detach", "-f", "origin/main"], wt);
+    sh("git", ["clean", "-ffdq"], wt);
     const logs = `${home}/Library/Logs/pronto`;
     Deno.mkdirSync(logs, { recursive: true });
     Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
@@ -262,15 +266,29 @@ if (import.meta.main) {
       "--allow-env=HOME,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
     ];
     const args = ["run", ...flags, `${wt}/${rels[0]}/alerts/subscriber.ts`, "run", ...rels.map((r) => `${wt}/${r}`)];
+    const previous = exists(agent) ? Deno.readTextFileSync(agent) : null;
     Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args, log: `${logs}/alerts-inbox.log`, env }));
+    const bootstrap = async () => {
+      // bootout returns before the job is gone: bootstrap again until it takes.
+      for (let i = 0; i < 5; i++) {
+        if (out("launchctl", ["bootstrap", `gui/${Deno.uid()}`, agent]).ok) return true;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      return false;
+    };
     out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
-    // bootout returns before the job is gone: bootstrap again until it takes.
-    let ok = false;
-    for (let i = 0; i < 5 && !ok; i++) {
-      ok = out("launchctl", ["bootstrap", `gui/${Deno.uid()}`, agent]).ok;
-      if (!ok) await new Promise((r) => setTimeout(r, 1000));
+    if (!await bootstrap() || !out("launchctl", ["print", `gui/${Deno.uid()}/${label}`]).ok) {
+      // The old job was booted out: put its plist back and start it again, or, with none before, take the new one away.
+      if (previous !== null) {
+        Deno.writeTextFileSync(agent, previous);
+        out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
+        await bootstrap();
+      } else {
+        out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
+        Deno.removeSync(agent);
+      }
+      throw new Error(`${label} did not load; ${previous !== null ? "the previous job is back" : "nothing is installed"}`);
     }
-    if (!out("launchctl", ["print", `gui/${Deno.uid()}/${label}`]).ok) throw new Error(`${label} is not loaded`);
     console.log(`${label}: reading ${apps.length} subscription(s) from ${wt} (origin/main ${sh("git", ["rev-parse", "--short", "HEAD"], wt)}), log ${logs}/alerts-inbox.log`);
   } else {
     if (!apps.length) throw new Error("name the apps' folders");
@@ -289,12 +307,12 @@ if (import.meta.main) {
               const r = await pollOnce({ api: "https://pubsub.googleapis.com", sub, token, dir, ntfyToken, say });
               if (r.pulled) say(`${sub.app}: ${r.written} written, ${r.pushed} to the phone, ${r.dropped} dropped`);
             } catch (e) {
-              say(`${sub.app}: ${(e as Error).message}`);
+              say(`${sub.app}: ${String(e)}`);
               await pause();
             }
           }
         } catch (e) {
-          say(`${a}: ${(e as Error).message}`);
+          say(`${a}: ${String(e)}`);
           await pause();
         }
       }
