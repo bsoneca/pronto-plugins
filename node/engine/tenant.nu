@@ -257,33 +257,87 @@ export def check-compose-sources [app_dir: string] {
 # reuses, but a cache mount (`RUN --mount=type=cache`) is shared by id across every build and the id is the Dockerfile's choice (the target path by default), so one tenant could seed
 # what another's build runs, or read what it left. The root fix is buildkit's own: `push.nu` gives every build `BUILDKIT_CACHE_MOUNT_NS=<namespace>` through bake's --set (which wins over a
 # compose `args` value, and a tenant's own `args` naming it is refused: check-build-keys), so every cache mount's id is prefixed with the namespace by the frontend itself, those an ONBUILD
-# trigger brings too. What follows is defence in depth on the staged text: every cache mount's id is also made `<namespace>/<its id, or its target with / as _>`, the flag read as buildkit
-# reads it (a flag name and a mount key or type in any case, a BOM before the text dropped), and refused: a mount value that has an escape character (a continuation line could append a
-# second `id=`), a variable in it, a quote, a cache mount with no target, an id with `..` or `/`, a `--mount` with no `=`, an `escape=` directive, a JSON Dockerfile, and any `# syntax=` (or
-# `//syntax=`) directive but the official docker/dockerfile frontend's, which is dropped so the built-in frontend builds it. Answers the rewritten text, or fails with what a tenant's Dockerfile does.
+# trigger brings too. What follows is defence in depth on the staged text, and it reads the Dockerfile as buildkit does, instruction by instruction: only the leading comments and blank lines
+# can hold a parser directive; only the flags of a RUN (and ONBUILD RUN) instruction are mount flags; a heredoc body, a comment, a command's arguments and every other instruction are
+# preserved byte for byte. Each cache mount's id is made `<namespace>/<its id, or its target>` (the target as it is: two targets are two ids), the flag read as buildkit reads it (a flag
+# name and a mount key or type in any case). Refused: a mount value that has an escape character (a continuation line could append a second `id=`), a variable in it, a quote, a cache
+# mount with no target, an explicit id with `..` or `/`, a `--mount` with no `=`, an `escape=` directive, and any `# syntax=` (or `//syntax=`) directive but the official docker/dockerfile
+# frontend's, which is dropped so the built-in frontend builds it. The frontend check runs again on the final bytes (BOM and shebang as buildkit skips them): a JSON Dockerfile, which
+# buildkit reads a frontend from, is refused wherever it came from, one an approved directive was hiding included. Answers the text bake is sent, or fails with what a tenant's Dockerfile does.
 export def stage-dockerfile [namespace: string]: string -> string {
 	# the BOM buildkit skips before it reads a directive is no part of the text the rest reads
 	let text = ($in | str replace --regex '^\x{FEFF}' '')
-	# buildkit drops a leading `#!` line before it reads a JSON Dockerfile, so the same line is dropped before this check
-	let body = ($text | str replace --regex '^#![^\n]*\n' '')
+	let official = '(?i)^\s*(#|//)\s*syntax\s*=\s*docker/dockerfile(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?\s*$'
+	mut out = []
+	mut leading = true
+	mut pending = []
+	mut ins = []
+	for line in ($text | split row "\n") {
+		let bare = ($line | str replace --regex '\r$' '')
+		# a heredoc body is content, up to its terminator
+		if ($pending | is-not-empty) {
+			$out = ($out | append $line)
+			if ($bare | str trim) == ($pending | first) { $pending = ($pending | skip 1) }
+			continue
+		}
+		if ($ins | is-empty) {
+			if $leading {
+				if ($bare | str trim | is-empty) or ($bare =~ '^\s*(#|//)') {
+					if ($bare =~ '(?i)^\s*(#|//)\s*escape\s*=') { error make {msg: "a tenant's Dockerfile has an `escape=` directive, which moves the character a continuation line joins with: a tenant's build uses the default"} }
+					if ($bare =~ '(?i)^\s*(#|//)\s*syntax\s*=') {
+						if not ($bare =~ $official) { error make {msg: "a tenant's Dockerfile has a `# syntax=` directive, which picks a build frontend of its own: a tenant's build uses the buildkitd's built-in one"} }
+						continue
+					}
+					$out = ($out | append $line)
+					continue
+				}
+				$leading = false
+			}
+			# a comment between instructions, or a blank line
+			if ($bare =~ '^\s*(#|$)') { $out = ($out | append $line); continue }
+		} else if ($bare =~ '^\s*#') {
+			# a comment line inside a continued instruction is skipped by the parser: it joins the instruction as it is
+			$ins = ($ins | append $line)
+			continue
+		}
+		$ins = ($ins | append $line)
+		if ($bare =~ '\\\s*$') { continue }
+		let done = (stage-instruction ($ins | str join "\n") $namespace)
+		$ins = []
+		$out = ($out | append $done.text)
+		$pending = ($pending | append $done.heredocs)
+	}
+	if ($ins | is-not-empty) { $out = ($out | append (stage-instruction ($ins | str join "\n") $namespace).text) }
+	let staged = ($out | str join "\n")
+	# the final bytes, read as buildkit reads the head of a Dockerfile: a leading shebang line is dropped before a JSON Dockerfile is detected
+	let body = ($staged | str replace --regex '^\x{FEFF}' '' | str replace --regex '^#![^\n]*\n' '')
 	if ($body | str trim | str starts-with '{') { error make {msg: "a tenant's Dockerfile is JSON, which buildkit reads a frontend directive from: a tenant's Dockerfile is plain"} }
-	if ($text =~ '(?im)^\s*(#|//)\s*escape\s*=') { error make {msg: "a tenant's Dockerfile has an `escape=` directive, which moves the character a continuation line joins with: a tenant's build uses the default"} }
-	# the official frontend's directive is dropped (the built-in one builds it); any other `syntax` directive picks a frontend of the Dockerfile's own, which can issue any cache id
-	let official = '(?im)^[ \t]*(#|//)[ \t]*syntax[ \t]*=[ \t]*docker/dockerfile(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?[ \t]*\r?$\n?'
-	let text = ($text | str replace --all --regex $official '')
-	if ($text =~ '(?im)^\s*(#|//)\s*syntax\s*=') { error make {msg: "a tenant's Dockerfile has a `# syntax=` directive, which picks a build frontend of its own: a tenant's build uses the buildkitd's built-in one"} }
-	if ($text =~ '(?i)--mount(\s|$)') { error make {msg: "a tenant's Dockerfile gives --mount without `=`: a tenant's mount flags are --mount=type=..."} }
-	let flags = ($text | parse --regex '(?i)(?<flag>--mount=\S*)' | get flag | uniq | sort-by {|f| $f | str length } --reverse)
-	mut out = $text
+	$staged
+}
+
+# One logical instruction (its continuation lines joined with "\n"): a RUN (or ONBUILD RUN) has its mount flags made safe; the heredoc terminators it opens are answered, so their bodies are left alone.
+def stage-instruction [ins: string, namespace: string]: nothing -> record {
+	let heredocs = ($ins | parse --regex r#'<<-?\s*["']?(?<w>[A-Za-z_][A-Za-z0-9_]*)["']?'# | get w)
+	let m = ($ins | parse --regex '(?s)^(?<head>\s*(?i:ONBUILD\s+)?RUN)(?<flags>(?:[ \t]+|\\\r?\n)*(?:--\S+(?:[ \t]+|\\\r?\n)*)*)(?<rest>.*)$')
+	if ($m | is-empty) { return {text: $ins, heredocs: $heredocs} }
+	let parts = ($m | first)
+	{text: $"($parts.head)((stage-run-flags $parts.flags $namespace))($parts.rest)", heredocs: $heredocs}
+}
+
+# The flags of one RUN, with every cache mount's id made the namespace's own.
+def stage-run-flags [flags: string, namespace: string]: nothing -> string {
+	if ($flags =~ '(?i)--mount(\s|$)') { error make {msg: "a tenant's Dockerfile gives --mount without `=`: a tenant's mount flags are --mount=type=..."} }
+	let found = ($flags | parse --regex '(?i)(?<flag>--mount=\S*)' | get flag | uniq | sort-by {|f| $f | str length } --reverse)
+	mut out = $flags
 	mut made = []
-	for i in 0..(($flags | length) - 1) {
-		if ($flags | is-empty) { break }
-		let flag = ($flags | get $i)
+	for i in 0..(($found | length) - 1) {
+		if ($found | is-empty) { break }
+		let flag = ($found | get $i)
 		let value = ($flag | str replace --regex '(?i)^--mount=' '')
 		if ($value | str contains '$') { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), which names a variable: a build argument would expand to a cache id outside the namespace's"} }
-		if ($value =~ r#'["\'`\\]'#) { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), with a quote or an escape character in it: a continuation line could append a second id, so a tenant's mount flags are plain"} }
+		if ($value =~ r#'["'`\\]'#) { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), with a quote or an escape character in it: a continuation line could append a second id, so a tenant's mount flags are plain"} }
 		let fields = ($value | split row ',' | each {|f| let kv = ($f | split row -n 2 '='); let k = ($kv | get 0 | str lowercase); let v = ($kv | get -o 1 | default ""); {k: $k, v: (if $k == "type" { $v | str lowercase } else { $v })} })
-		let kind = ($fields | where k == "type" | get -o 0.v | default "" | str lowercase)
+		let kind = ($fields | where k == "type" | get -o 0.v | default "")
 		let placeholder = $"__TENANT_MOUNT_($i)__"
 		$out = ($out | str replace --all $flag $placeholder)
 		if $kind != "cache" {
@@ -294,7 +348,7 @@ export def stage-dockerfile [namespace: string]: string -> string {
 		if ($target | is-empty) { error make {msg: $"a tenant's Dockerfile has the cache mount ($flag), which names no target"} }
 		let given = ($fields | where k == "id" | get -o 0.v | default "")
 		if ($given | str contains '..') or ($given | str contains '/') { error make {msg: $"a tenant's Dockerfile has the cache mount id ($given), with `..` or `/` in it: a tenant's cache ids are plain names"} }
-		let id = if ($given | is-empty) { $target | str replace --all '/' '_' } else { $given }
+		let id = if ($given | is-empty) { $target } else { $given }
 		let kept = ($fields | where k != "id" | each {|f| if ($f.v | is-empty) { $f.k } else { $"($f.k)=($f.v)" } })
 		$made = ($made | append {placeholder: $placeholder, flag: $"--mount=($kept | append $"id=($namespace)/($id)" | str join ',')"})
 	}
