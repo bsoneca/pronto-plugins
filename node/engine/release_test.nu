@@ -340,6 +340,8 @@ def main [] {
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	test_a_tenants_retirement_is_the_engines_to_decide
 	test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name
+	test_a_tenants_secret_and_seed_names_are_resource_names_never_options
+	test_a_tenants_own_vendored_engine_does_not_copy_the_schema_onto_itself
 	test_a_tenants_schema_that_is_not_a_regular_file_is_refused_unread
 	test_a_tenants_env_link_is_refused_and_never_opened
 	test_a_tenants_push_rights_are_only_what_its_path_uses
@@ -2476,6 +2478,7 @@ def test_a_tenants_compose_files_name_nothing_outside_the_app [] {
 		{why: "an include", yaml: "include: [other.yaml]\nservices: {}\n", says: "has include"}
 		{why: "ssh forwarding into a build", yaml: "services:\n  crud:\n    build: {context: ., ssh: [default]}\n", says: "forwards the release's ssh agent"}
 		{why: "an extends that names another file", yaml: "services:\n  crud:\n    image: x\n    extends: {file: base.yaml, service: b}\n", says: "services.crud.extends.file names another file"}
+		{why: "an oci-layout additional context (a local directory)", yaml: "services:\n  crud:\n    build:\n      context: .\n      additional_contexts:\n        base: oci-layout:///etc/layout\n", says: "services.crud.build.additional_contexts names oci-layout:///etc/layout, which is not a path inside the app's own folder"}
 		{why: "a build context that is a URL", yaml: "services:\n  crud:\n    build: https://example.com/x.git\n", says: "not a path inside the app's own folder"}
 	]
 	for c in $cases {
@@ -2661,7 +2664,7 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 	print "test a tenant's retirement is validated in the engine before any write: only #RetireKinds, the resource kubectl is told is the allowlist's own, never the database, a volume claim, a Secret, the namespace's record or what the release writes..."
 	let w = (tenant-world)
 	let objects = '[{kind: Deployment, metadata: {name: game-crud}}]'
-	let kinds = $"use ($engine_dir | path join tenant.nu); let kinds = \(tenant retire-kinds\); let node = {retire: [RETIRE]}; tenant check-retire $node $kinds ($objects) | to json --raw"
+	let kinds = $"use ($engine_dir | path join tenant.nu); let kinds = \(tenant retire-kinds\); let node = {retire: [RETIRE], services: {crud: {seed: {game-seeded: \"flags/flags.json\"}}}}; tenant check-retire $node $kinds ($objects) | to json --raw"
 	let ask = {|retire: string| in-world $w -c ($kinds | str replace 'RETIRE' $retire) }
 	let refused = [
 		{retire: '{kind: Cluster, name: game-db, resource: "cluster.postgresql.cnpg.io"}', says: "retire names Cluster/game-db: a tenant's release may retire only"}
@@ -2674,8 +2677,10 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 		{retire: '{kind: CronJob, name: old, resource: cronjob.batch}', says: "which a tenant's release never retires"}
 		{retire: '{kind: ServiceAccount, name: publisher, resource: serviceaccount}', says: "ServiceAccount/publisher, which a tenant's release never retires"}
 		{retire: '{kind: ServiceAccount, name: other, resource: serviceaccount}', says: "which a tenant's release never retires"}
-		{retire: '{kind: ConfigMap, name: pronto-release, resource: configmap}', says: "the namespace's own record"}
+		{retire: '{kind: ConfigMap, name: pronto-release, resource: configmap}', says: "retire names ConfigMap/pronto-release, an object the provisioner or the engine owns"}
+		{retire: '{kind: ConfigMap, name: kube-root-ca.crt, resource: configmap}', says: "retire names ConfigMap/kube-root-ca.crt, an object the provisioner or the engine owns"}
 		{retire: '{kind: Deployment, name: game-crud, resource: deployment.apps}', says: "which this release writes"}
+		{retire: '{kind: ConfigMap, name: game-seeded, resource: configmap}', says: "retire names ConfigMap/game-seeded, which this release writes"}
 	]
 	for c in $refused {
 		let r = (do $ask $c.retire)
@@ -2706,6 +2711,7 @@ def test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name [
 		{obj: '{apiVersion: batch/v1, kind: CronJob, metadata: {name: j, namespace: ns}, spec: {jobTemplate: {spec: {template: {metadata: {finalizers: [example.com/hold]}}}}}}', says: "CronJob/j sets spec.jobTemplate.spec.template.metadata.finalizers"}
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {template: {metadata: {finalizers: [example.com/hold]}}}}}', says: "ExternalSecret/e sets spec.target.template.metadata.finalizers"}
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {manifest: {apiVersion: v1, kind: Secret}}}}', says: "ExternalSecret/e sets spec.target.manifest"}
+		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: "--kubeconfig=/tmp/x", namespace: ns}}', says: "is not named as a Kubernetes resource is"}
 		{obj: '{apiVersion: v1, kind: ServiceAccount, metadata: {name: publisher, namespace: ns}}', says: "ServiceAccount/publisher is an object the provisioner or the engine owns"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: pronto-release, namespace: ns}, immutable: true}', says: "ConfigMap/pronto-release is an object the provisioner or the engine owns"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: kube-root-ca.crt, namespace: ns}}', says: "ConfigMap/kube-root-ca.crt is an object the provisioner or the engine owns"}
@@ -2723,6 +2729,47 @@ def test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name [
 	let seed = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-seeds [{name: pronto-release, path: p, file: f}]")
 	assert ($seed.exit_code != 0) "a seed named pronto-release was not refused"
 	assert (has $seed.stderr "seed the ConfigMap pronto-release, which the provisioner or the engine owns") $seed.stderr
+	rm -rf $w.dir
+}
+
+def test_a_tenants_secret_and_seed_names_are_resource_names_never_options [] {
+	print "test a Secret or seed name in a tenant's Node that kubectl would parse as an option (a --kubeconfig names a credential plugin it runs) is refused before any kubectl call..."
+	let w = (tenant-world)
+	for node in ['{services: {a: {secrets: {K: "--kubeconfig=/tmp/x"}}}}' '{services: {a: {secrets: {K: "-n"}}}}' '{services: {a: {seed: {"--all": "f"}}}}' '{services: {a: {secrets: {K: "Upper"}}}}'] {
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-names ($node)")
+		assert ($r.exit_code != 0) $"($node) was not refused"
+		assert (has $r.stderr "not Kubernetes resource names") $"($node): ($r.stderr)"
+	}
+	let ok = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-names {services: {a: {secrets: {K: game-auth-secrets}, seed: {game-flags: f}}}}")
+	assert equal $ok.exit_code 0 $ok.stderr
+	rm -rf $w.dir
+}
+
+def test_a_tenants_own_vendored_engine_does_not_copy_the_schema_onto_itself [] {
+	print "test an app that runs its own vendored engine (one real file) passes the schema check, and a node or node/schema folder that is a link is refused..."
+	let w = (tenant-world)
+	let vendored = ($w.dir | path join vendored)
+	mkdir ($vendored | path join node)
+	^cp -RL $"($engine_dir)/." ($vendored | path join node)
+	let same = (in-world $w -c $"use ($vendored | path join node tenant.nu); tenant check-engine-copy '($vendored)'")
+	assert equal $same.exit_code 0 $"($same.stdout)\n($same.stderr)"
+	# a linked `node` leads the replacement into another checkout
+	let other = ($w.dir | path join other)
+	mkdir ($other | path join schema)
+	^cp ($engine_dir | path join schema node.cue) ($other | path join schema node.cue)
+	let app = ($w.app)
+	^mv ($app | path join node) ($w.dir | path join node.moved)
+	^ln -s $other ($app | path join node)
+	let linked = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-engine-copy '($app)'")
+	assert ($linked.exit_code != 0) "a linked node folder was not refused"
+	assert (has $linked.stderr "the app's node is a symlink, not a folder") $linked.stderr
+	rm -f ($app | path join node)
+	^mv ($w.dir | path join node.moved) ($app | path join node)
+	rm -rf ($app | path join node schema)
+	^ln -s ($other | path join schema) ($app | path join node schema)
+	let schema = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-engine-copy '($app)'")
+	assert ($schema.exit_code != 0) "a linked node/schema folder was not refused"
+	assert (has $schema.stderr "the app's node/schema is a symlink, not a folder") $schema.stderr
 	rm -rf $w.dir
 }
 

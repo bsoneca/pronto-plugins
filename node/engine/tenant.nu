@@ -38,6 +38,15 @@ def schema-export [expr: string]: nothing -> any {
 	$r.stdout | from json
 }
 
+# A name the tenant's Node gives kubectl (a Secret a service reads, a ConfigMap it seeds) is a Kubernetes resource name, never an option:
+# one that starts with a dash would be parsed as a flag (a `--kubeconfig` can name a credential plugin kubectl runs). Said before the first
+# kubectl call that carries one.
+export def check-names [node: record] {
+	let names = ($node.services? | default {} | values | each {|s| ($s.secrets? | default {} | values) | append ($s.seed? | default {} | columns) } | flatten | uniq)
+	let bad = ($names | where {|n| not (($n | into string) =~ '^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$') })
+	if ($bad | is-not-empty) { error make {msg: $"Node.services name ($bad | length) Secret or seed name\(s\) that are not Kubernetes resource names \(lowercase letters, digits, '-' and '.', starting and ending with a letter or digit\): ($bad | each {|n| $n | into string | str substring 0..40 | to nuon } | str join ', ')"} }
+}
+
 # A ConfigMap a service seeds is a ConfigMap the release writes: never one of the objects the provisioner or the engine owns (`#TenantReserved`).
 export def check-seeds [seeds: list] {
 	let reserved = (schema-export '#TenantReserved' | where kind == ConfigMap | get name)
@@ -58,10 +67,13 @@ export def retire-kinds []: nothing -> record {
 # (never an option, a list or a selector), and neither the release's own record nor an object this release writes. It is always deleted in
 # the tenant's namespace, `-n` of the caller. Refused before any write. Answers `{resource, name}` for each.
 export def check-retire [node: record, kinds: record, objects: list]: nothing -> list {
-	let written = ($objects | each {|o| $"($o.kind)/($o.metadata.name)" })
+	# what the release writes: its rendered objects and the ConfigMaps its services seed (applied apart from them, then mounted)
+	let seeded = ($node.services? | default {} | values | each {|s| $s.seed? | default {} | columns } | flatten | each {|n| $"ConfigMap/($n)" })
+	let written = ($objects | each {|o| $"($o.kind)/($o.metadata.name)" } | append $seeded)
 	let exported = (do { cd ($engine_dir | path join schema); ^cue export --out json -e '#TenantNoRetire' node.cue } | complete)
 	if $exported.exit_code != 0 { error make {msg: $"the engine's schema does not export #TenantNoRetire: ($exported.stderr | str trim)"} }
 	let never = ($exported.stdout | from json)
+	let reserved = (schema-export '#TenantReserved')
 	let planned = ($node.retire? | default [])
 	let problems = ($planned | each {|r|
 		let kind = ($r.kind? | default "")
@@ -75,8 +87,8 @@ export def check-retire [node: record, kinds: record, objects: list]: nothing ->
 			$"retire names ($id), which a tenant's release never retires \(the provisioner's publisher account, a NetworkPolicy and a CronJob are not its to delete\)"
 		} else if $id in $written {
 			$"retire names ($id), which this release writes"
-		} else if $kind == "ConfigMap" and $name == "pronto-release" {
-			$"retire names ($id), the namespace's own record"
+		} else if ($reserved | any {|x| $x.kind == $kind and $x.name == $name }) {
+			$"retire names ($id), an object the provisioner or the engine owns"
 		}
 	} | compact)
 	if ($problems | is-not-empty) { error make {msg: $"a tenant's retirement is refused: ($problems | str join '; ')"} }
@@ -120,6 +132,12 @@ export def check-engine-copy [app_dir: string] {
 	let own = ($engine_dir | path join schema node.cue)
 	let theirs = ($app_dir | path join node schema node.cue)
 	let dir = ($theirs | path dirname)
+	# `node` and `node/schema` are real folders of the app, never links (a link would lead the replacement into another checkout)
+	let node_dir = ($app_dir | path join node)
+	for step in [{in: $app_dir, name: "node", label: "node"} {in: $node_dir, name: "schema", label: "node/schema"}] {
+		let found = if ($step.in | path type) == "dir" { ls -a $step.in | where {|e| ($e.name | path basename) == $step.name } } else { [] }
+		if ($found | is-not-empty) and $found.0.type != "dir" { error make {msg: $"the app's ($step.label) is a ($found.0.type), not a folder: a tenant's release follows no link to its schema"} }
+	}
 	let entry = if ($dir | path type) == "dir" { ls -a $dir | where {|e| ($e.name | path basename) == "node.cue" } } else { [] }
 	if ($entry | is-empty) { error make {msg: $"($theirs) is missing: a tenant's release imports the engine's schema from the app's node/schema"} }
 	# only a regular file of the engine's own size is opened: a link, a FIFO (which would wait for a writer) or a device is refused unread
@@ -127,8 +145,13 @@ export def check-engine-copy [app_dir: string] {
 	# the folder holds that file alone: anything else would be loaded with the schema's package
 	let others = (ls -a $dir | get name | each {|n| $n | path basename } | where {|n| $n != "node.cue" })
 	if ($others | is-not-empty) { error make {msg: $"the app's node/schema holds ($others | str join ', ') beside node.cue: a tenant's release trusts no schema folder its author could have added to"} }
-	# …and the engine's own copy is put over it, so nothing the author wrote is ever read (a comparison would leave a window between check and use)
-	cp $own $theirs
+	# …and the engine's own copy is put over it, so nothing the author wrote is ever read (a comparison would leave a window between check and
+	# use): written beside it and renamed over it, never into the entry itself. An app that runs its own vendored engine holds the one file
+	# (same real path): nothing to put over it.
+	if ($own | path expand) == ($theirs | path expand) { return }
+	let fresh = ($dir | path join $".node.cue.(random uuid)")
+	cp $own $fresh
+	mv -f $fresh $theirs
 }
 
 def as-list [v: any]: nothing -> list {
@@ -206,7 +229,7 @@ export def check-compose-sources [app_dir: string] {
 				let extra = ($rec | get -o additional_contexts | default {})
 				let pairs = if ($extra | describe | str starts-with "record") { $extra | transpose k v | each {|p| $p.v } } else { as-list $extra | each {|l| $l | into string | split row -n 2 "=" | last } }
 				for v in $pairs {
-					if ($v | into string) =~ '^(docker-image|service|target|oci-layout):' { continue }
+					if ($v | into string) =~ '^(docker-image|service|target):' { continue }
 					let bad = (compose-path-problem $root $v $"($at).build.additional_contexts")
 					if $bad != null { $problems = ($problems | append $bad) }
 				}
@@ -269,6 +292,8 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
 		mut why = []
+		# a name kubectl is handed (rollback reads the Deployments' revisions by it) is a resource name, never an option
+		if not (($o.metadata?.name? | default "" | into string) =~ '^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$') { $why = ($why | append $"($id) is not named as a Kubernetes resource is") }
 		# …on the object, and on the metadata a controller copies onto the objects it makes: a pod template's (a ReplicaSet and a Job copy
 		# finalizers onto every pod, which then never finish terminating), a CronJob's, an ExternalSecret's target template
 		for at in [[metadata] [spec template metadata] [spec jobTemplate spec template metadata] [spec target template metadata]] {
