@@ -133,9 +133,26 @@ if (!globalThis.__prontoJourneys) {
 		String(text ?? "")
 			.replace(/https?:\/\/\S*/g, "<url>")
 			.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>")
-			.replace(/eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "<token>")
+			.replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "<token>")
 			.replace(/[A-Za-z0-9_+/=-]{24,}/g, "<token>")
 			.replace(/\d[\d.\-/ ]{6,}\d/g, "<number>");
+	// A path is scrubbed a segment at a time, each as it reads once decoded (ana%40gmail.com is an address): a
+	// segment that holds something is replaced by its scrubbed form, any other is kept as written, so a long
+	// legitimate path (/shell/hatches/journeys/telemetry.js) is not taken for a token.
+	const scrubPath = (path) =>
+		path
+			.split("/")
+			.map((segment) => {
+				let read = segment;
+				try {
+					read = decodeURIComponent(segment);
+				} catch {
+					// not encoded: as written
+				}
+				const clean = scrub(read);
+				return clean === read ? segment : clean;
+			})
+			.join("/");
 	const clean = (text) => (FEN.test(text) || MOVE.test(text) ? "" : scrub(text).slice(0, ERROR_TEXT));
 	const messageOf = (x) => clean(x instanceof Error ? x.message : typeof x === "string" ? x : "");
 	// A frame is rebuilt from fields a strict shape validated, never copied: Chrome's "at fn (url:1:2)" or
@@ -157,7 +174,7 @@ if (!globalThis.__prontoJourneys) {
 			const m = c ?? g;
 			if (!m) continue;
 			// The path is scrubbed too: a valid script path can hold an address or a token (/users/ana@x.com/app.js).
-			const path = scrub(m[2].replace(/^https?:\/\/[^/]*/, "")).replace(/<url>/g, "");
+			const path = scrubPath(m[2].replace(/^https?:\/\/[^/]*/, ""));
 			out.push((c ? `${m[1] ? `${m[1]} (` : ""}${path}:${m[3]}:${m[4]}${m[1] ? ")" : ""}` : `${m[1]}@${path}:${m[3]}:${m[4]}`).slice(0, ERROR_TEXT));
 			if (out.length === STACK_FRAMES) break;
 		}

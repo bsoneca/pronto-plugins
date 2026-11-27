@@ -32,6 +32,7 @@ The host is [`host.cue`](host.cue), the schema [`schema.cue`](schema.cue), the g
 
 - [`tests.cue`](tests.cue): the exported files, checked with `cue vet`.
 - [`test.nu`](test.nu): the generate step against a fixture app.
+- [`reporter_test.nu`](reporter_test.nu) runs [`reporter_check.js`](reporter_check.js) (deno): the reporter loaded with a page's globals stubbed, errors thrown at it, and the beacon read back (name-only when off; messages, headers, queries, paths, tokens and the tag when on).
 
 ```sh
 ./saytw --script tools.nu cue vet -c ./journeys
