@@ -85,6 +85,31 @@ import "list"
 	// and a change to the file is a change of the policies at the next apply.
 	notificationChannels: [Name=string]: #NotificationChannel
 	alertPolicies: [Name=string]:        #AlertPolicies
+	// Subscribers to the project's alerts (#AlertSubscriber), by the name of their channel.
+	alertSubscribers: [Name=string]: #AlertSubscriber
+	// Each makes its channel, named as it is.
+	// A topic has one channel: a second would send the same alert twice.
+	for nm, _ in alertSubscribers if len([for _, c in notificationChannels if c.pubsub != _|_ if c.pubsub.topic == nm {c}]) > 1 {
+		"alert subscriber \(nm) has more than one notification channel": _|_
+	}
+
+	// A policy or check that opts out of a subscriber does not name its channel.
+	for nm, a in alertPolicies for c in a.channels if notificationChannels[c].pubsub != _|_ if list.Contains((#skip & {to: a.toSubscribers, names: [for n, _ in alertSubscribers {n}]}).out, notificationChannels[c].pubsub.topic) {
+		"alert policies \(nm) name channel \(c) of a subscriber they opt out of": _|_
+	}
+	for nm, u in uptimeChecks for c in u.channels if notificationChannels[c].pubsub != _|_ if list.Contains((#skip & {to: u.toSubscribers, names: [for n, _ in alertSubscribers {n}]}).out, notificationChannels[c].pubsub.topic) {
+		"uptime check \(nm) names channel \(c) of a subscriber it opts out of": _|_
+	}
+	for nm, _ in alertSubscribers {notificationChannels: (nm): pubsub: topic: nm}
+
+	// A channel adopted without its topic would publish nowhere.
+	for nm, c in notificationChannels if c.pubsub != _|_ if !adoptAll && list.Contains(*adopt["notificationChannels"] | [], nm) && !list.Contains(*adopt["topics"] | [], c.pubsub.topic) {
+		"notification channel \(nm) is adopted without its topic \(c.pubsub.topic)": _|_
+	}
+	for nm, c in notificationChannels if c.pubsub != _|_ if alertSubscribers[c.pubsub.topic] == _|_ {
+		"notification channel \(nm) names no alert subscriber topic \(c.pubsub.topic)": _|_
+	}
+
 	// Custom metrics, by type (custom.googleapis.com/...): the descriptor is made here, so a policy that reads
 	// the series is valid before the first point is written (a PromQL condition on a metric Cloud Monitoring
 	// does not know yet is refused with a 400). Every alert policy of the project waits for them. Made, never imported.
@@ -161,7 +186,7 @@ import "list"
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "metricDescriptors" | "uptimeChecks" | "workloadIdentityPools"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "metricDescriptors" | "uptimeChecks" | "workloadIdentityPools" | "topics"
 
 #Found: "serviceAccounts" | "members"
 
@@ -328,9 +353,22 @@ import "list"
 	transactionLogDays:  *3 | int & >=1 & <=7
 }
 
-// A Cloud Monitoring notification channel: mail to one address.
-#NotificationChannel: {
-	email!: =~"^[^@\\s]+@[^@\\s]+$"
+// A Cloud Monitoring notification channel: mail to one address, or a Pub/Sub topic this project's
+// alertSubscribers make (named by its key there), which a subscriber pulls from.
+#NotificationChannel: {email!: =~"^[^@\\s]+@[^@\\s]+$"} | {pubsub!: topic: string & !=""}
+
+// A subscriber to the project's alerts: a Pub/Sub topic, a pull subscription on it, and the
+// Cloud Monitoring channel that publishes to the topic (made here, so no notificationChannels
+// entry is needed). `file` is a JSON file of the operator's repository, beside the state folder
+// (pronto-alerts writes observability/alerts.subscriber.json): {topic, subscription, channel,
+// ackDeadlineSeconds, messageRetentionDuration}. Monitoring's notification service account may
+// publish to the topic; `subscribers` (members) may pull from the subscription. The channel is
+// sent every alert policy and uptime check of the project, but those that set
+// `toSubscribers: false`. Made here, never imported.
+#AlertSubscriber: {
+	file!: string & =~"\\.json$"
+	// Never everyone: a member that may pull the alerts is named.
+	subscribers: *{} | {[#Member & !="allUsers" & !="allAuthenticatedUsers"]: true}
 }
 
 // PromQL alerting policies, from a JSON file of the operator's repository, beside the state
@@ -343,6 +381,8 @@ import "list"
 	file?: string & =~"\\.json$"
 	policies: [Name=string]: #AlertPolicy
 	channels: [...string]
+	// Also sent to the project's alertSubscribers: all (true), none (false), or all but the topics listed.
+	toSubscribers: *true | false | [...string]
 }
 
 // A custom metric's descriptor. The default is a gauge of integers with no unit, the shape of a
@@ -386,7 +426,9 @@ import "list"
 	failingLocations: *2 | int & >=1
 	window:           *"300s" | =~"^[0-9]+s$"
 	severity:         *"page" | "warning"
-	documentation:    *"The check of \(host)\(path) fails from several regions: the node, its tunnel or the app is down, or Cloudflare blocks the checkers." | string
+	// Also sent to the project's alertSubscribers: all (true), none (false), or all but the topics listed.
+	toSubscribers: *true | false | [...string]
+	documentation: *"The check of \(host)\(path) fails from several regions: the node, its tunnel or the app is down, or Cloudflare blocks the checkers." | string
 	channels: [...string]
 }
 
