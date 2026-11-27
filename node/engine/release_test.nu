@@ -2839,6 +2839,8 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		{why: "a plain heredoc in an ONBUILD", text: "FROM b\nONBUILD RUN cat <<EOF\nhi\nEOF\n", says: "`<<` in an ONBUILD instruction"}
 		{why: "a continuation ended by a form feed", text: "FROM b\nRUN echo hi \\\u{0C}\nRUN --mount=type=cache,target=/x,id=../victim true\n", says: "control character"}
 		{why: "a continuation ended by a no-break space", text: "FROM b\nRUN echo hi \\\u{A0}\nRUN --mount=type=cache,target=/x,id=../victim true\n", says: "non-ASCII white space"}
+		{why: "a heredoc terminator with two carriage returns", text: "FROM b\nRUN cat <<Y\nY\r\r\nRUN --mount=type=cache,target=/x,id=../victim true\nY\n", says: "carriage return"}
+		{why: "a lone carriage return", text: "FROM b\rRUN true\n", says: "carriage return"}
 		{why: "a vertical tab", text: "FROM b\nRUN echo\u{0B}hi\n", says: "control character"}
 		{why: "an ideographic space", text: "FROM b\nRUN echo\u{3000}hi\n", says: "non-ASCII white space"}
 		{why: "a here-string", text: "FROM b\nRUN cat <<<#Y\nRUN --mount=type=cache,target=/x,id=../victim true\n#Y\n", says: "not a plain heredoc word"}
@@ -2858,6 +2860,8 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		let got = (try { $text | tenant stage-dockerfile $ns } catch {|e| $"REFUSED: ($e.msg)" })
 		assert (not ($got | str starts-with "REFUSED")) $"($form) was refused: ($got)"
 	}
+	let crlf = ("FROM b\r\nRUN cat <<EOF\r\nhi\r\nEOF\r\nRUN --mount=type=cache,target=/a true\r\n" | tenant stage-dockerfile $ns)
+	assert ($crlf | str contains $"id=($ns)//a") "a CRLF Dockerfile is staged"
 	assert equal ("FROM b\nRUN echo \"<<#Y\"\nRUN --mount=type=cache,target=/x true\n" | tenant stage-dockerfile $ns) $"FROM b\nRUN echo \"<<#Y\"\nRUN --mount=type=cache,target=/x,id=($ns)//x true\n" "a quoted << is no heredoc word"
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"

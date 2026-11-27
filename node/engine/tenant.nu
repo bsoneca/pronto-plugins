@@ -270,6 +270,8 @@ export def stage-dockerfile [namespace: string]: string -> string {
 	# Buildkit and a regular expression disagree on what white space is (a form feed, a no-break space): a Dockerfile is plain, so no control character but tab, line feed and carriage return,
 	# and no non-ASCII white space, is read at all, and every continuation below is a backslash, spaces and tabs, and the line end.
 	if ($text =~ r#'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'#) { error make {msg: "a tenant's Dockerfile has a control character (other than tab, line feed and carriage return): a tenant's Dockerfile is plain text"} }
+	# a carriage return is only half of a CRLF line end: buildkit trims every trailing one off a heredoc terminator, a hand strip trims one
+	if ($text =~ r#'\r(?!\n)'#) { error make {msg: "a tenant's Dockerfile has a carriage return that does not end a CRLF line end: a tenant's Dockerfile is plain text"} }
 	if ($text =~ r#'[\x{00A0}\x{1680}\x{2000}-\x{200B}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]'#) { error make {msg: "a tenant's Dockerfile has non-ASCII white space (a no-break space and the like), which buildkit and the staging read differently: a tenant's Dockerfile is plain text"} }
 	# the staging swaps text for `__TENANT_COMMENT_<n>__` and `__TENANT_MOUNT_<n>__` placeholders while it works and swaps it back: a Dockerfile that has the word could smuggle text across
 	if ($text | str contains '__TENANT_') { error make {msg: "a tenant's Dockerfile has `__TENANT_`, a word the engine's staging keeps for itself"} }
