@@ -398,7 +398,10 @@ export def record-release [app_dir: string, node: record, pushed: record, --tena
 	let dirty = (do { cd $app_dir; ^git status --porcelain -- . } | complete | if $in.exit_code == 0 { $in.stdout | str trim | is-not-empty } else { true })
 	let sha = if $dirty { "" } else { do { cd $app_dir; ^git rev-parse HEAD } | complete | if $in.exit_code == 0 { $in.stdout | str trim } else { "" } }
 	let pin = if $git_root.exit_code == 0 { $git_root.stdout | str trim | path join .github node-engine.pin } else { "" }
-	let engine = if ($pin | is-not-empty) and ($pin | path exists) { open --raw $pin | str trim } else { "" }
+	# The pin is a regular file in a real `.github` folder (a link at either place would carry whatever it points at into the namespace's ConfigMap, which a tenant reads)
+	# and a commit's 40 hex digits: anything else records nothing.
+	let pin_dir = if ($pin | is-not-empty) { $pin | path dirname } else { "" }
+	let engine = if ($pin | is-not-empty) and ($pin_dir | path type) == "dir" and ($pin | path type) == "file" { (open --raw $pin | str trim) | if $in =~ '^[0-9a-f]{40}$' { $in } else { "" } } else { "" }
 	let images = ($pushed | items {|svc, p| [$svc $"($p.tag)@($p.digest)"] } | into record)
 	{
 		apiVersion: "v1", kind: "ConfigMap"
