@@ -212,4 +212,7 @@ cases: {
 		{call: "alerts.tailOf", args: ["ERROR: (gcloud.auth.print-access-token) You do not currently have an active account selected.\n", 5, 20], expect: "ERROR: (gcloud.auth.", why: "a long line is cut"},
 		{call: "alerts.tailOf", args: [""], expect: ""},
 	]}
+	"a path is missing when it is not there or its parent is no directory, and any other error is said": {suite: "alerts", steps: [
+		{call: "alertsrun.existence", args: [], expect: {there: true, absent: false, belowFile: false, said: "PermissionDenied"}},
+	]}
 }
