@@ -313,7 +313,7 @@ so a bound every node needs is written here once, with defaults, and each reposi
   It reads its settings from `/etc/pronto/docker-gc.env`.
 - `host.nu`: `render <host.json>` gives the files (the script, the env file from the values, the service, the timer); `apply <host.json>
   [--node user@host] [--check]` writes what drifted (each file whole beside itself, then renamed), reloads systemd and enables the timer, or with
-  `--check` only says and exits 1. An ssh is one BatchMode login, never retried.
+  `--check` only says and exits 1. Each read, write and systemctl call is an ssh login of its own (BatchMode, a connect timeout), none retried.
 - `export/`: `cue export ./node/host/export -e files --out json`, what `bin/pronto-node --host <dir>` writes into `<dir>/node-host/`, byte for byte.
   A repository pins this repository's merge in a file of its own (`.github/node-host.pin`), apart from the engine's, so a host change
   does not regenerate every app's `node/`.

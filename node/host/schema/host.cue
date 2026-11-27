@@ -18,7 +18,9 @@ package schema
 	// A bash ERE, kept inside single quotes in /etc/pronto/docker-gc.env, so it holds none.
 	refPattern:   *"^localhost:[0-9]+/" | (string & =~"^\\^[^']*$")
 	buildCacheGB: *40 | (int & >0)
-	capGB:        *120 | (int & >buildCacheGB)
+	// The default is not kept when it would not exceed the cache: a larger cache needs a larger cap said.
+	capGB: (*120 | int) & >buildCacheGB
 	// A systemd OnCalendar expression.
-	onCalendar: *"hourly" | (string & !="")
+	// One line: it is written into a unit file, where a newline would start another setting.
+	onCalendar: *"hourly" | (string & =~"^[^\n]+$")
 }

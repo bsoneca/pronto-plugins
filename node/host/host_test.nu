@@ -19,6 +19,7 @@ def main [] {
 	test_apply_writes_what_drifted_and_a_second_run_finds_none
 	test_check_changes_nothing_and_says_every_drift
 	test_a_failed_last_run_is_drift
+	test_a_login_that_fails_is_an_error_not_an_answer
 	print "\nAll node host tests passed."
 }
 
@@ -75,6 +76,10 @@ def test_the_schema_defaults_and_refuses [] {
 	assert (not (host-with "{dockerGC: {refPattern: \"localhost\"}}").ok) "a pattern without ^"
 	assert (not (host-with "{dockerGC: {refPattern: \"^a'b\"}}").ok) "a quote in the pattern"
 	assert (not (host-with "{dockerGC: {onCalendar: \"\"}}").ok) "no schedule"
+	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\n[Service]\"}}").ok) "a schedule that starts another setting"
+	# A cache past the default cap needs a cap said: the default is not kept under the cache, or the job would fail every hour.
+	assert (not (host-with "{dockerGC: {buildCacheGB: 130}}").ok) "a cache past the default cap"
+	assert equal (host-with "{dockerGC: {buildCacheGB: 130, capGB: 200}}").host.dockerGC.capGB 200
 }
 
 def test_render_holds_the_defaults_and_the_nodes_values [] {
@@ -187,6 +192,33 @@ def test_check_changes_nothing_and_says_every_drift [] {
 		let log = (open --raw ($dir | path join systemctl.log))
 		assert (not ($log | str contains "enable --now")) "nothing enabled"
 		assert (not ($log | str contains "daemon-reload"))
+	}
+	rm -rf $dir
+}
+
+def test_a_login_that_fails_is_an_error_not_an_answer [] {
+	print "test an ssh that fails (255) when asked whether the timer runs is an error, never read as not failed or not enabled..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	# Over a fake ssh, so the script is single-quoted for the node's shell as in production; its systemctl is-* queries fail as a lost login does.
+	'#!/bin/bash
+d=$(dirname "$0")/..
+while [ "$1" = -o ]; do shift 2; done
+shift
+case "$1" in *is-failed*|*is-enabled*) exit 255 ;; esac
+exec bash -c "$1"
+' | save --raw ($dir | path join bin ssh)
+	chmod 755 ($dir | path join bin ssh)
+	'#!/bin/bash
+exec "$@"
+' | save --raw ($dir | path join bin sudo)
+	chmod 755 ($dir | path join bin sudo)
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		let msg = (try { apply (defaults) --node fake --root $root; "no error" } catch {|e| $e.msg })
+		assert str contains $msg "asking whether"
+		# What it wrote before asking is whole: the files are as #Host says.
+		for f in (render (defaults)) { assert equal (open --raw ($root + $f.path)) $f.text }
 	}
 	rm -rf $dir
 }

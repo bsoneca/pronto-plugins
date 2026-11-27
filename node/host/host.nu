@@ -6,8 +6,9 @@
 #   nu node/host/host.nu apply <host.json> [--check] [--node user@host]
 #
 # <host.json> is the node's #Host exported (`cue export -e host --out json`). Without --node it works on this
-# machine (as the node itself would), with it over one ssh each way and sudo, never retried: a failed login
-# gets the Mac banned by the node's CrowdSec. --check changes nothing and exits 1 on any drift.
+# machine (as the node itself would), with it over ssh and sudo: each read, write and systemctl call is an ssh login of
+# its own (BatchMode, with a connect timeout), none retried, because a failed login gets the Mac banned by the node's
+# CrowdSec. --check changes nothing and exits 1 on any drift.
 # --root <dir> puts every path under it (for the tests).
 
 const here = path self | path dirname
@@ -45,18 +46,20 @@ export def render [host: record]: nothing -> list<record> {
 	]
 }
 
-# Runs a shell script on the node (ssh, sudo for root) or here. $stdin, when given, is its standard input.
-def sh [node: string, script: string, stdin?: string]: nothing -> record {
-	let run = if $node == "" {
-		if $stdin == null { do { ^bash -c $script } | complete } else { $stdin | do { ^bash -c $script } | complete }
-	} else {
-		let remote = $"sudo bash -c ($script | to json)"
-		if $stdin == null { do { ^ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 $node $remote } | complete } else { $stdin | do { ^ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 $node $remote } | complete }
+# Runs a shell script on the node (ssh, as root through sudo unless --plain) or here. $stdin, when given, is its
+# standard input. The script reaches the node's shell single-quoted, so the login shell expands nothing in it.
+export def sh [node: string, script: string, stdin?: string, --plain]: nothing -> record {
+	if $node == "" {
+		if $stdin == null { return (do { ^bash -c $script } | complete) }
+		return ($stdin | do { ^bash -c $script } | complete)
 	}
-	$run
+	let quoted = ($script | str replace --all "'" "'\\''")
+	let remote = if $plain { $script } else { $"sudo bash -c '($quoted)'" }
+	let opts = [-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2]
+	if $stdin == null { do { ^ssh ...$opts $node $remote } | complete } else { $stdin | do { ^ssh ...$opts $node $remote } | complete }
 }
 
-def must [r: record, what: string]: nothing -> string {
+export def must [r: record, what: string]: nothing -> string {
 	if $r.exit_code != 0 { error make {msg: $"node-host: ($what) failed: ($r.stderr | str trim)"} }
 	$r.stdout
 }
@@ -85,11 +88,16 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 	# The timer starts at boot and is running now, and its job's last run did not fail (setting the timer
 	# again does not clear that: the operator reads journalctl -u).
 	let service = ($gc_unit | str replace ".timer" ".service")
-	if (sh $node $"systemctl is-failed --quiet ($service)").exit_code == 0 {
+	# 255 is ssh's own failure, not an answer: a login that failed must not read as "not failed" or "not enabled".
+	let failed = (sh $node $"systemctl is-failed --quiet ($service)")
+	if $failed.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed: ($failed.stderr | str trim)"} }
+	if $failed.exit_code == 0 {
 		$drift = ($drift | append $"($service) failed its last run")
 		print $"drift: ($service) failed its last run"
 	}
-	let on = ((sh $node $"systemctl is-enabled --quiet ($gc_unit) && systemctl is-active --quiet ($gc_unit)").exit_code == 0)
+	let state = (sh $node $"systemctl is-enabled --quiet ($gc_unit) && systemctl is-active --quiet ($gc_unit)")
+	if $state.exit_code == 255 { error make {msg: $"node-host: asking whether ($gc_unit) runs: ($state.stderr | str trim)"} }
+	let on = ($state.exit_code == 0)
 	if not $on {
 		$drift = ($drift | append $"($gc_unit) is not enabled and active")
 		print $"drift: ($gc_unit) is not enabled and active"
