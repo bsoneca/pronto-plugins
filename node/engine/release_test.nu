@@ -2826,14 +2826,23 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	for row in [
 		{why: "the comment placeholder smuggles a mount out of a comment", text: "FROM b\nRUN --mount=type=tmpfs,target=/__TENANT_COMMENT_0__ \\\n#x --mount=type=cache,target=/y,id=victim echo #\n true\n", says: "a word the engine's staging keeps for itself"}
 		{why: "the mount placeholder", text: "FROM b\nRUN --mount=type=bind,target=/__TENANT_MOUNT_0__ --mount=type=cache,target=/a,id=victim true\n", says: "a word the engine's staging keeps for itself"}
-		{why: "a heredoc word split by a continuation (buildkit reads the name #AB)", text: "FROM b\nRUN cat <<#A\\\nB\n#AB\nRUN --mount=type=cache,target=/x,id=../victim true\n#A\n", says: "splits a heredoc word across a continuation"}
+		{why: "a heredoc word split by a continuation (buildkit reads the name #AB)", text: "FROM b\nRUN cat <<#A\\\nB\n#AB\nRUN --mount=type=cache,target=/x,id=../victim true\n#A\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
 		{why: "a heredoc name with a backslash (buildkit reads #EOF)", text: "FROM b\nRUN cat <<#E\\OF\n#EOF\nRUN --mount=type=cache,target=/x,id=../victim true\n#E\\OF\n", says: "with a backslash in it"}
+		{why: "a word joined to the next line's << (buildkit reads a<<#X, no heredoc)", text: "FROM b\nRUN echo a\\\n<<#X\nRUN --mount=type=cache,target=/x,id=../victim true\n#X\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a file descriptor before <<, which buildkit reads as a heredoc, hiding a second heredoc", text: "FROM b\nRUN cat 3<<#E\nRUN cat <<#Y\n#E\nRUN --mount=type=cache,target=/x,id=../victim true\n#Y\n", says: "with `..` or `/` in it"}
+		{why: "a heredoc with a continuation in a COPY", text: "FROM b\nCOPY <<EOF \\\n  /x\nhello\nEOF\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a < and a < joined across a continuation", text: "FROM b\nRUN cat <\\\n<#A\n#A\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a quoted name joined across a continuation", text: "FROM b\nRUN cat <<'A\\\nB'\nAB\nRUN --mount=type=cache,target=/x,id=../v true\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
 		{why: "a frontend directive after a shebang and a BOM", text: "#!x\n\u{FEFF}# syntax=evil/f\nFROM b\n", says: "`# syntax=` directive"}
 		{why: "an approved directive, then a JSON frontend", text: "# syntax=docker/dockerfile:1\n{\"syntax\":\"evil/f\"}\n", says: "is JSON"}
 	] {
 		let r = (try { $row.text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
 		assert (($r != "admitted") and ($r | str contains $row.says)) $"($row.why): ($r)"
 	}
+	let fd = ("FROM b\nRUN cat 3<<#E\nRUN cat <<-#Y\n#E\nRUN --mount=type=cache,target=/x true\n" | tenant stage-dockerfile $ns)
+	assert equal $fd $"FROM b\nRUN cat 3<<#E\nRUN cat <<-#Y\n#E\nRUN --mount=type=cache,target=/x,id=($ns)//x true\n" "an fd-prefixed heredoc has a body, which is content; what follows it is an instruction again"
+	let ordinary = "# syntax=docker/dockerfile:1\nFROM node:22 AS build\nWORKDIR /app\nCOPY package.json ./\nRUN --mount=type=cache,target=/root/.npm \\\n    npm ci\nCOPY <<EOF /etc/x.conf\nhello\nEOF\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN apt-get update && \\\n    # comment\n    apt-get install -y curl\n"
+	assert equal ($ordinary | tenant stage-dockerfile $ns) $"FROM node:22 AS build\nWORKDIR /app\nCOPY package.json ./\nRUN --mount=type=cache,target=/root/.npm,id=($ns)//root/.npm \\\n    npm ci\nCOPY <<EOF /etc/x.conf\nhello\nEOF\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN apt-get update && \\\n    # comment\n    apt-get install -y curl\n" "an ordinary Dockerfile: the official directive dropped, the mount rewritten, the heredocs and the continued commands as they were"
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [

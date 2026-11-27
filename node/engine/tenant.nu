@@ -376,12 +376,18 @@ def shell-words [text: string]: nothing -> list<string> {
 def stage-instruction [ins: string, namespace: string]: nothing -> record {
 	# a heredoc is opened by RUN, COPY and ADD (ONBUILD included), by a word that begins with `<<` and has a name (buildkit's `^<<(-?)\s*([^<]*)$`, the name unquoted)
 	let keyword = ($ins | parse --regex '(?is)^\s*(?:ONBUILD\s+)?(?<k>[A-Za-z]+)' | get -o 0.k | default "" | str uppercase)
-	let candidates = if $keyword in [RUN COPY ADD] { shell-words $ins | where {|w| $w =~ '^<<' } } else { [] }
+	# Buildkit joins the lines of a continued instruction with no separator and reads a heredoc from a word that is `<<` (or a file descriptor and `<<`) and a name: a hand split of the words
+	# keeps diverging from it (a word joined to the next line's `<<`, a name joined across lines), so every ambiguous form is refused: a RUN, COPY or ADD that has a continuation and `<<`
+	# anywhere (once its lines are joined as buildkit joins them), and any heredoc word with a backslash or split across a continuation. A heredoc is read only in a one-line instruction.
+	if $keyword in [RUN COPY ADD] and ($ins =~ '\\[ \t]*\r?\n') and (($ins | str replace --all --regex '\\[ \t]*\r?\n' '') =~ '<<') {
+		error make {msg: "a tenant's Dockerfile has `<<` in a RUN, COPY or ADD with a continuation line: buildkit joins the lines with no separator and reads a heredoc from the joined words, so a tenant's heredoc is in an instruction of one line"}
+	}
+	let candidates = if $keyword in [RUN COPY ADD] { shell-words $ins | where {|w| $w =~ '^\d*<<' } } else { [] }
 	# buildkit unescapes a heredoc name (`<<#E\OF` is the name `#EOF`): a tenant's heredoc word has no backslash, so the name here is the name there
 	let escaped = ($candidates | where {|w| $w | str contains "\\" })
 	if ($escaped | is-not-empty) { error make {msg: $"a tenant's Dockerfile has the heredoc word ($escaped | first), with a backslash in it: buildkit unescapes a heredoc name and a tenant's is plain"} }
 	let heredocs = ($candidates | each {|w|
-		let m = ($w | parse --regex '^<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
+		let m = ($w | parse --regex '^\d*<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
 		if $m == null { null } else {
 			let name = ($m.name | str replace --all --regex r#'["']'# '')
 			if ($name | is-empty) { null } else { {word: $name, dash: ($m.dash == "-")} }
