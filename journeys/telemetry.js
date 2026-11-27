@@ -132,7 +132,7 @@ if (!globalThis.__prontoJourneys) {
 	const scrub = (text) =>
 		String(text ?? "")
 			.replace(/https?:\/\/\S*/gi, "<url>")
-			.replace(/(\/[\w.~%-]*)[?#]\S*/g, "$1")
+			.replace(/[?#&][^\s?#&=]*=\S*/g, "")
 			.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>")
 			.replace(/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "$1<token>")
 			.replace(/[A-Za-z0-9_+/=-]{24,}/g, "<token>")

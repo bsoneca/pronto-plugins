@@ -101,6 +101,12 @@ check("a lone surrogate in a scrubbed segment does not lose the beacon or the ad
 const emoji = await thrown(withStack("x", ["p (https://x.example/f/\u{1F600}ana@example.com/app.js:1:2)"]), { detail: true });
 check("a valid emoji beside an address is kept, escaped", emoji.stack === "p (/f/%F0%9F%98%80<email>/app.js:1:2)");
 
+// A relative query or fragment leaks whatever precedes it: any ? # & that starts a key=value goes.
+for (const [input, kept] of [["page.html?token=s1", "page.html"], ["?token=s2", ""], ["#access_token=s3", ""], ["/a+b?k=s4", "/a+b"], ["/caf\u00e9?k=s5", "/caf\u00e9"], ["x=1&token=s6", "x=1"]]) {
+	const e = await thrown(withStack(`failed ${input} end`, ["f (/a.js:1:2)"]), { detail: true });
+	check(`a relative query is dropped: ${input}`, e.message === `failed ${kept} end` && !/s[1-6]\b/.test(e.message));
+}
+
 // URL schemes are case-insensitive; a relative url's query is private too; no lookbehind (older Safari fails to parse one).
 const urls = await thrown(withStack("see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag", ["f (/a.js:1:2)"]), { detail: true });
 check("a mixed-case scheme and a relative url lose their query", !/blue-fox|token=|secret|k=v/.test(JSON.stringify(urls)) && urls.message.includes("<url>"));

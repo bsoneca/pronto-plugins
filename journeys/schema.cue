@@ -423,7 +423,7 @@ _journeysHours: {
 					message = string(.message) ?? ""
 					message = replace(message, r'[^\s@]+@[^\s@]+', "<email>")
 					message = replace(message, r'(?i)https?://[^\s)]*', "<url>")
-					message = replace(message, r'(/[A-Za-z0-9_.~%-]*)[?#]\S*', "${1}")
+					message = replace(message, r'[?#&][^\s?#&=]*=\S*', "")
 					message = replace(message, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
 					message = replace(message, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					message = slice(message, 0, 200) ?? ""
@@ -725,10 +725,10 @@ _journeysHours: {
 					"""#
 			},
 			{
-				name: "a mixed-case scheme and a relative url lose their query in a message"
-				in: {name: "Error", message: "see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag"}
+				name: "a mixed-case scheme and any relative query or fragment lose their value in a message"
+				in: {name: "Error", message: "see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag and page.html?token=s1 and ?token=s2 and #access_token=s3 and /a+b?k=s4 and /caf\u00e9?k=s5"}
 				check: #"""
-					!contains(string!(.message), "blue-fox") && !contains(string!(.message), "token=") && !contains(string!(.message), "secret") && contains(string!(.message), "<url>")
+					!contains(string!(.message), "blue-fox") && !contains(string!(.message), "token=") && !contains(string!(.message), "secret") && !contains(string!(.message), "s1") && !contains(string!(.message), "s2") && !contains(string!(.message), "s3") && !contains(string!(.message), "s4") && !contains(string!(.message), "s5") && contains(string!(.message), "<url>")
 					"""#
 			},
 			{
