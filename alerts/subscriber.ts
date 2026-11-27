@@ -163,12 +163,20 @@ const out = (cmd: string, args: string[], env: Record<string, string> = {}) => {
   return { ok: r.success, text: new TextDecoder().decode(r.stdout).trim() };
 };
 
+// The environment gcloud is run with: the job's own (the plist's) PATH, HOME and Python and the `pronto` configuration, nothing else.
+const tokenEnv = (): Record<string, string> => ({
+  PATH: Deno.env.get("PATH") ?? "",
+  HOME: Deno.env.get("HOME") ?? "",
+  CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto",
+  ...(Deno.env.get("CLOUDSDK_PYTHON") ? { CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON")! } : {}),
+});
+
 // The `pronto` gcloud configuration's token, never the default one (the owner's other work), held here only.
 function gcloudToken() {
   let held = "";
   return async (refresh = false) => {
     if (!held || refresh) {
-      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token", "--verbosity=error"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "piped" }).output();
+      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token", "--verbosity=error"], clearEnv: true, env: tokenEnv(), stdout: "piped", stderr: "piped" }).output();
       const token = new TextDecoder().decode(r.stdout).trim();
       if (!r.success || !token) throw new Error(`gcloud printed no access token for the pronto configuration (exit ${r.code}): ${tailOf(new TextDecoder().decode(r.stderr))}`);
       held = token;
@@ -249,6 +257,8 @@ if (import.meta.main) {
       if (ntfy) hosts.add(new URL(ntfy.url).host);
     }
     Deno.mkdirSync(cache, { recursive: true });
+    // Where the running job's worktree is now, to put it back if the new job does not load.
+    const was = exists(`${wt}/.git`) ? sh("git", ["rev-parse", "HEAD"], wt) : null;
     if (!exists(`${wt}/.git`)) sh("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, "origin/main"]);
     sh("git", ["checkout", "-q", "--detach", "-f", "origin/main"], wt);
     sh("git", ["clean", "-ffdq"], wt);
@@ -263,7 +273,7 @@ if (import.meta.main) {
       // The inbox folder holds the worktree: the job writes the inbox, never the code it runs.
       `--deny-write=${wt}`,
       `--allow-run=/usr/bin/security,${gcloudAt}`,
-      "--allow-env=HOME,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
+      "--allow-env=HOME,PATH,CLOUDSDK_PYTHON,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
     ];
     const args = ["run", ...flags, `${wt}/${rels[0]}/alerts/subscriber.ts`, "run", ...rels.map((r) => `${wt}/${r}`)];
     const previous = exists(agent) ? Deno.readTextFileSync(agent) : null;
@@ -278,16 +288,19 @@ if (import.meta.main) {
     };
     out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
     if (!await bootstrap() || !out("launchctl", ["print", `gui/${Deno.uid()}/${label}`]).ok) {
-      // The old job was booted out: put its plist back and start it again, or, with none before, take the new one away.
+      // The old job was booted out: put its plist and its code back and start it again, or, with none before, take the new one away.
+      out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
       if (previous !== null) {
         Deno.writeTextFileSync(agent, previous);
-        out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
-        await bootstrap();
-      } else {
-        out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
-        Deno.removeSync(agent);
+        if (was) {
+          sh("git", ["checkout", "-q", "--detach", "-f", was], wt);
+          sh("git", ["clean", "-ffdq"], wt);
+        }
+        const back = await bootstrap() && out("launchctl", ["print", `gui/${Deno.uid()}/${label}`]).ok;
+        throw new Error(`${label} did not load; ${back ? "the previous job is back, on its previous code" : `nothing is loaded (the previous plist is restored at ${agent})`}`);
       }
-      throw new Error(`${label} did not load; ${previous !== null ? "the previous job is back" : "nothing is installed"}`);
+      Deno.removeSync(agent);
+      throw new Error(`${label} did not load; nothing is installed`);
     }
     console.log(`${label}: reading ${apps.length} subscription(s) from ${wt} (origin/main ${sh("git", ["rev-parse", "--short", "HEAD"], wt)}), log ${logs}/alerts-inbox.log`);
   } else {
