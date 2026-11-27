@@ -10,7 +10,6 @@ _incident: {
 	id:      *"0.fixture1" | string
 	sev:     *"Critical" | string
 	started: *1795000000 | number
-	started: *1795000000 | number
 	policy:  *"Journey: checkout burn" | string
 	bare:    *false | bool
 	out: {
@@ -247,6 +246,8 @@ cases: {
 		{get: "heartbeat", expect: false, why: "the pull answered, the inbox did not take it"},
 		{use: "locked"},
 		{get: "errors.length", expect: 1},
+		{use: "locked"},
+		{get: "calls", expect: ["pull Bearer word1"], why: "no acknowledge: the incident stays with Pub/Sub"},
 		{call: "alertsrun.drain", args: [{batches: [[{id: "m1", incident: (_incident & {id: "0.i7"}).out}]]}]},
 		{get: "heartbeat", expect: true},
 	]}

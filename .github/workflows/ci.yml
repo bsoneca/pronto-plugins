@@ -182,8 +182,19 @@ jobs:
           ./bin/pronto-alerts "$app"
           grep -q "the app's own" "$app/alerts_spec.cue"
           test -f "$app/alerts/subscriber.ts" && test -f "$app/alerts/inbox.js" && test -f "$app/alerts_plugin.cue"
-          # The cases that hold the rules come with them, the driver imported from the app's own alerts/, and the generate rule exports both files.
+          # The cases come only where the app's unit runner is wired for them: a suite its #Suite does not name would fail its whole unit gate.
+          test ! -e "$app/tests/unit/alerts.cue"
+          mkdir -p "$app/tests/unit"
+          cp harness/files/tests/unit/schema.cue "$app/tests/unit/schema.cue"
+          printf 'package unit\n\n#Suite: "rules"\n' > "$app/tests/unit/suites.cue"
+          printf "import * as alerts from '../../alerts/inbox.js';\nimport * as alertsrun from './alerts_run.js';\n" > "$app/tests/unit/registry.js"
+          msg=$(./bin/pronto-alerts "$app" 2>&1)
+          case "$msg" in *"tests/unit/alerts.cue not written"*) ;; *) echo "$msg"; exit 1 ;; esac
+          test ! -e "$app/tests/unit/alerts.cue"
+          printf 'package unit\n\n#Suite: "rules" | "alerts"\n' > "$app/tests/unit/suites.cue"
+          ./bin/pronto-alerts "$app"
           test -f "$app/tests/unit/alerts.cue" && grep -q "from '../../alerts/subscriber.ts'" "$app/tests/unit/alerts_run.js"
+          (cd "$app" && cue vet -c tests/unit/*.cue)
           grep -q 'rulemap: alerts:' "$app/pronto/alerts.cue" && grep -q 'alertsubscriber' "$app/pronto/exports.nu"
           jq -e '.app == "demo-app" and .topic == "alerts-demo-app" and .subscription == "alerts-demo-app-inbox" and .project == "demo-project-1" and .ackDeadlineSeconds == 60 and .messageRetentionDuration == "604800s" and .push == ["CRITICAL"]' "$app/observability/alerts.subscriber.json"
           jq -e 'length == 1 and .[0].name == "alerts-subscriber-lag" and (.[0].expr | contains("alerts-demo-app-inbox"))' "$app/observability/alerts.policies.json"

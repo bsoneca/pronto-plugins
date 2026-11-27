@@ -37,10 +37,18 @@ done
 package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
 [ -n "$package" ] || { echo "pronto-alerts: $app/program.cue names no package" >&2; exit 2; }
 name=$(basename "$app")
+# The cases (tests/unit/alerts.cue) are written only where the app's unit runner is wired for them: its #Suite names "alerts" and its
+# registry.js imports both namespaces. A suite the app's schema does not name fails every unit run (tests/unit.ts vets all of tests/unit/*.cue).
+cases=false
+if [ -f "$app/tests/unit/suites.cue" ] && grep -q '"alerts"' "$app/tests/unit/suites.cue" && [ -f "$app/tests/unit/registry.js" ] && grep -q 'alerts/inbox.js' "$app/tests/unit/registry.js" && grep -q 'alerts_run.js' "$app/tests/unit/registry.js"; then
+	cases=true
+else
+	echo "pronto-alerts: tests/unit/alerts.cue not written: wire the app's unit runner first (alerts/README.md, \"Its tests, and its generation\"), then run this again" >&2
+fi
 files=$(mktemp)
 trap 'rm -f "$files"' EXIT
 cd "$here"
-./saytw --script tools.nu cue export ./alerts/export -t "package=$package" -t "app=$name" -t "project=${project:-my-project-1}" -e files --out json > "$files"
+./saytw --script tools.nu cue export ./alerts/export -t "package=$package" -t "app=$name" -t "project=${project:-my-project-1}" -t "cases=$cases" -e files --out json > "$files"
 ./saytw --script tools.nu nu bin/write.nu "$files" "$app"
 # What the spec says, as the files the infra plugin and the driver read: written whole each time.
 mkdir -p "$app/observability"

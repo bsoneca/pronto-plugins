@@ -57,9 +57,20 @@ export function writeAll(file: { writeSync(p: Uint8Array): number }, buf: Uint8A
   }
 }
 
+// A directory's entries flushed: a file made or renamed in it is kept across a crash only once its directory is.
+function syncDir(dir: string) {
+  const d = Deno.openSync(dir, { read: true });
+  try {
+    d.syncSync();
+  } finally {
+    d.close();
+  }
+}
+
 // `data` appended to the file at `path`, flushed to disk. A file that ends in anything but a newline (an earlier append that was cut
 // off) first gets one, so the cut-off fragment is a line of its own, which the readers skip, and never the front of this record.
 export function appendDurably(path: string, data: Uint8Array) {
+  const made = !exists(path);
   const file = Deno.openSync(path, { create: true, read: true, append: true });
   try {
     const size = file.statSync().size;
@@ -73,6 +84,7 @@ export function appendDurably(path: string, data: Uint8Array) {
   } finally {
     file.close();
   }
+  if (made) syncDir(path.slice(0, path.lastIndexOf("/")) || "/");
 }
 
 // The previous day's inbox is renamed for its day, and rotated files past seven days are removed. A day's
@@ -84,10 +96,14 @@ function rotate(dir: string, app: string, today: string) {
     const was = day(Deno.statSync(path).mtime ?? new Date());
     if (was !== today) {
       const to = `${dir}/${rotatedName(app, was)}`;
-      if (!exists(to)) Deno.renameSync(path, to);
+      if (!exists(to)) {
+        Deno.renameSync(path, to);
+        syncDir(dir);
+      }
       else {
         appendDurably(to, Deno.readFileSync(path));
         Deno.removeSync(path);
+        syncDir(dir);
       }
     }
   } catch (e) {
@@ -184,7 +200,7 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
 // --- The driver. ---
 const out = (cmd: string, args: string[], env: Record<string, string> = {}) => {
   const r = new Deno.Command(cmd, { args, env, stdout: "piped", stderr: "piped" }).outputSync();
-  return { ok: r.success, text: new TextDecoder().decode(r.stdout).trim() };
+  return { ok: r.success, text: new TextDecoder().decode(r.stdout).trim(), err: new TextDecoder().decode(r.stderr) };
 };
 
 // The environment gcloud is run with: the job's own (the plist's) PATH, HOME and Python and the `pronto` configuration, nothing else.
@@ -224,6 +240,7 @@ const read = (app: string): Subscription => {
 };
 
 const label = "dev.pronto.alerts-inbox";
+const say_ = (s: string) => console.log(s);
 
 if (import.meta.main) {
   const home = Deno.env.get("HOME")!;
@@ -232,9 +249,15 @@ if (import.meta.main) {
   const apps = (verb === first ? rest : Deno.args).map((a) => Deno.realPathSync(a));
   const agent = `${home}/Library/LaunchAgents/${label}.plist`;
   if (verb === "uninstall") {
-    // Not loaded is fine; a job that is loaded and will not boot out is not, and a plist that cannot be removed is not.
+    // A service launchd does not know is not loaded and there is nothing to boot out; any other failure of `print` is not that, so the
+    // job is booted out all the same, and a bootout that fails is an error.
     const target = `gui/${Deno.uid()}/${label}`;
-    if (out("launchctl", ["print", target]).ok && !out("launchctl", ["bootout", target]).ok) throw new Error(`${label} is loaded and launchctl would not boot it out`);
+    const printed = out("launchctl", ["print", target]);
+    if (!printed.ok && !/could not find service/i.test(printed.err)) say_(`launchctl print said: ${tailOf(printed.err)}`);
+    if (printed.ok || !/could not find service/i.test(printed.err)) {
+      const gone = out("launchctl", ["bootout", target]);
+      if (!gone.ok) throw new Error(`${label} would not boot out: ${tailOf(gone.err)}`);
+    }
     try {
       Deno.removeSync(agent);
     } catch (e) {

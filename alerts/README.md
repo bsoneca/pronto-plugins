@@ -21,13 +21,14 @@ internet) into a file the lead tails; a CRITICAL one is also sent to the phone (
 
 ## Its tests, and its generation
 
-The installer also writes the cases that hold the rules and the driver (`tests/unit/alerts.cue`, and
+The installer also writes, once the app's unit runner is wired for them, the cases that hold the rules and the driver (`tests/unit/alerts.cue`, and
 `tests/unit/alerts_run.js`, which runs `alerts/subscriber.ts` against a fake Pub/Sub endpoint), and the
 generate rule that writes `observability/alerts.*.json` from the spec (`pronto/alerts.cue`, with
 `pronto/exports.nu`, which evaluates the program once for every plugin). The app wires its own unit runner
 once: the suite `alerts` in `tests/unit/suites.cue`, `import * as alerts from '../../alerts/inbox.js'` and
 `import * as alertsrun from './alerts_run.js'` in `tests/unit/registry.js` (both namespaces), and a `test`
-check that runs `tests/unit.ts -- alerts`. A change to `alerts_spec.cue` is then one `generate` away from
+check that runs `tests/unit.ts -- alerts`; then run `bin/pronto-alerts` again. Until the suite is in the app's `#Suite` and the
+registry imports both, the installer writes no cases and says so (a suite the schema does not name fails every unit run of the app). A change to `alerts_spec.cue` is then one `generate` away from
 the files the infra state and the subscriber read.
 
 ## Turn it on for an app
