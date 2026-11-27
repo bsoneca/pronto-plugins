@@ -337,7 +337,11 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			# `serviceAccount` is the deprecated spelling of `serviceAccountName`, and either may carry the account
 			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
 				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
+				# the database operator names the cluster's account `<cluster>-db` and binds it to what the database needs, which a tenant's workload never is
+				if ($account | str ends-with "-db") { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
 			}
+			# …nor a pod the operator would take for one of the cluster's (it selects its pods, and its policies admit them, by this label)
+			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| $k == "cnpg.io/cluster" }) { $why = ($why | append $"($id) carries the label cnpg.io/cluster, which marks a database's own pods") }
 			# no runtime class (a sandbox or a host runtime of the node's) and no priority class (a tenant must not pre-empt the node's own pods)
 			if ($spec.runtimeClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets runtimeClassName ($spec.runtimeClassName)") }
 			if ($spec.priorityClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets priorityClassName ($spec.priorityClassName)") }
