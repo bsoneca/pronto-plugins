@@ -1,7 +1,7 @@
 // pronto-alerts' driver (alerts/subscriber.ts) run once against a fake Pub/Sub pull endpoint and a fake phone, both on
 // localhost, with an inbox folder of its own: what the inbox held when each acknowledge arrived, which calls came in
 // what order, and what the phone was told. No network and no credentials: the token is a function that returns a word.
-import { exists, pollOnce } from '../../alerts/subscriber.ts';
+import { appendDurably, exists, pollOnce, writeAll } from '../subscriber.ts';
 
 // A message as :pull returns it: the incident as Cloud Monitoring publishes it, in base64.
 export const message = (id, incident) => ({ messageId: id, data: btoa(JSON.stringify(incident)) });
@@ -11,7 +11,7 @@ export const garbage = (id) => ({ messageId: id, data: btoa('not an incident') }
 export const leaks = (text) => ['RESOURCE-LABEL-MARKER', 'RESOURCE-NAME-MARKER', 'METRIC-LABEL-MARKER', 'FILTER-MARKER', 'DOCUMENTATION-MARKER', 'SUMMARY-MARKER'].filter((m) => text.includes(m));
 
 // `batches` are the pulls' answers in order (each a list of messages); `refuseFirst` answers the first call 401.
-export async function drain({ batches, push = ['CRITICAL'], phone = true, refuseFirst = false, passes, fail, now, old }) {
+export async function drain({ batches, push = ['CRITICAL'], phone = true, refuseFirst = false, passes, fail, now, old, lockInbox }) {
   const dir = Deno.makeTempDirSync({ prefix: 'alerts-' });
   const calls = [], inboxAtAck = [], told = [], tokens = [];
   const inboxPath = `${dir}/my-app.jsonl`;
@@ -35,6 +35,11 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
   });
   const base = fail === 'network' ? 'http://localhost:1' : `http://localhost:${server.addr.port}`;
   const errors = [];
+  if (lockInbox) {
+    // An inbox that exists and cannot be written (the heartbeat's own file still can be).
+    Deno.writeTextFileSync(`${dir}/my-app.jsonl`, '');
+    Deno.chmodSync(`${dir}/my-app.jsonl`, 0o444);
+  }
   if (old) {
     // An inbox left by an earlier day, and a file for that day already there: rotation must keep both.
     Deno.writeTextFileSync(`${dir}/my-app.jsonl`, old.current);
@@ -64,8 +69,9 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
   const text = (() => { try { return Deno.readTextFileSync(inboxPath); } catch { return ''; } })();
   const heartbeat = (() => { try { return /^\d{4}-\d\d-\d\dT/.test(Deno.readTextFileSync(`${dir}/my-app.heartbeat`)); } catch { return false; } })();
   const files = Object.fromEntries([...Deno.readDirSync(dir)].map((f) => [f.name, Deno.readTextFileSync(`${dir}/${f.name}`)]));
+  if (lockInbox) Deno.chmodSync(`${dir}/my-app.jsonl`, 0o644);
   Deno.removeSync(dir, { recursive: true });
-  return { errors, files, results, calls, inboxAtAck, told, tokens, inbox: text.split('\n').filter(Boolean).map((l) => JSON.parse(l)), raw: text, heartbeat };
+  return { errors, files, results, calls, inboxAtAck, told, tokens, inbox: text.split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }), raw: text, heartbeat };
 }
 
 // `exists` on a path below a file (NotADirectory) or below a directory nobody may enter (a permission error): the first is missing, the second is
@@ -82,4 +88,26 @@ export function existence() {
   const r = { there: exists(`${dir}/file`), absent: exists(`${dir}/none`), belowFile: exists(`${dir}/file/x`), said };
   Deno.removeSync(dir, { recursive: true });
   return r;
+}
+
+// writeAll on a sink that takes at most `most` bytes a call (a short write), and on one that takes none.
+export function shortWrites({ text, most }) {
+  const got = [];
+  let calls = 0;
+  writeAll({ writeSync: (p) => { calls++; const n = Math.min(most, p.length); got.push(...p.subarray(0, n)); return n; } }, new TextEncoder().encode(text));
+  return { text: new TextDecoder().decode(new Uint8Array(got)), calls };
+}
+export function stuckWrite() {
+  try { writeAll({ writeSync: () => 0 }, new TextEncoder().encode('abc')); return 'returned'; } catch (e) { return e.message; }
+}
+
+// appendDurably on a file that holds `before`: what it holds after `data`.
+export function appended({ before, data }) {
+  const dir = Deno.makeTempDirSync({ prefix: 'alerts-append-' });
+  const path = `${dir}/inbox.jsonl`;
+  if (before !== null) Deno.writeTextFileSync(path, before);
+  appendDurably(path, new TextEncoder().encode(data));
+  const text = Deno.readTextFileSync(path);
+  Deno.removeSync(dir, { recursive: true });
+  return text;
 }

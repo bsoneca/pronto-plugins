@@ -4,8 +4,9 @@ package export
 
 import "github.com/bsoneca/pronto-plugins/alerts:alerts"
 
-_package: string @tag(package)
-_app:     string @tag(app)
-_project: string @tag(project)
+_package: string        @tag(package)
+_app:     string        @tag(app)
+_project: string        @tag(project)
+_cases:   bool | *false @tag(cases,type=bool)
 
-files: (alerts.#Host & {package: _package, app: _app, project: _project}).files
+files: (alerts.#Host & {package: _package, app: _app, project: _project, cases: _cases}).files
