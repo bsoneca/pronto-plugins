@@ -201,8 +201,8 @@ errorsCappedPerSession: _j.collector.transforms.errors_per_session & {type: "thr
 errorsCappedPerError: _j.collector.transforms.errors_per_error & {type: "throttle", key_field: "{{ fingerprint }}", threshold: 20, window_secs: 60}
 errorsRedactedBeforeCap: _j.collector.transforms.errors_per_error.inputs & ["errors_clean"]
 errorsOnlyErrors: _j.collector.transforms.errors_in.condition & ".type == \"error\""
-// The reporter sends the name, a trimmed message, the top frame and the screen; a page reports a few, once each.
-reporterSendsError: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "const event = { type: \"error\", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? \"\").slice(0, ERROR_TEXT), frame: frameOf(thrown), screen: current };") & true
+// The reporter sends the name, a trimmed message, the top frame, a few frames, a fixed browser tag and the screen; a page reports a few, once each.
+reporterSendsError: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "const event = { type: \"error\", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? \"\").slice(0, ERROR_TEXT), frame: frameOf(thrown), stack: stackOf(thrown), browser: browserOf(), screen: current };") & true
 reporterCapsErrors: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;") & true
 
 // A journey may count no unstarted runs: each moment says which, and the run

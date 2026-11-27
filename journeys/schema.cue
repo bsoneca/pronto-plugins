@@ -382,6 +382,12 @@ _journeysHours: {
 					frame = replace(frame, r'\?[^\s):]*', "")
 					frame = replace(frame, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
 					frame = slice(frame, 0, 200) ?? ""
+					stack = replace(string(.stack) ?? "", r'https?://[^/\s)]*', "")
+					stack = replace(stack, r'\?[^\s):]*', "")
+					stack = replace(stack, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
+					stack = slice(stack, 0, 600) ?? ""
+					browser = string(.browser) ?? ""
+					if !includes(["instagram", "facebook", "wv", "other"], browser) { browser = "" }
 					screen = string(.screen) ?? ""
 					if !match(screen, r'^[A-Za-z0-9_/-]{1,60}$') { screen = "" }
 					kind = if .kind == "rejection" { "rejection" } else { "error" }
@@ -393,10 +399,11 @@ _journeysHours: {
 						"source": "frontend",
 						"kind": kind,
 						"screen": screen,
+						"browser": browser,
 						"revision": get_env_var("K_REVISION") ?? "",
 						"fingerprint": name + " " + replace(frame, r':\d+', ""),
 					}
-					if frame != "" { .stack_trace = "    at " + frame }
+					if stack != "" { .stack_trace = "    at " + replace(stack, "\n", "\n    at ") } else if frame != "" { .stack_trace = "    at " + frame }
 					"""#
 			}
 			errors_per_error: {
@@ -604,6 +611,27 @@ _journeysHours: {
 				in: {name: "not a name!", message: strings.Repeat("ab ", 200)}
 				check: #"""
 					strlen(string!(.message)) == 216 && starts_with(string!(.message), "frontend Error: ab ab")
+					"""#
+			},
+			{
+				name: "a browser error's stack keeps its top frames without origins, queries or build hashes"
+				in: {name: "Error", message: "m", frame: "f (https://x.example/a.js:1:1)", stack: "f (https://x.example/a.1a2b3c4d.js?v=1:3:4)\ng (https://x.example/b.js:5:6)"}
+				check: #"""
+					.stack_trace == "    at f (/a.js:3:4)\n    at g (/b.js:5:6)"
+					"""#
+			},
+			{
+				name: "a browser error names an in-app browser by a fixed tag, never a user agent"
+				in: {name: "Error", message: "m", browser: "instagram"}
+				check: #"""
+					.browser == "instagram"
+					"""#
+			},
+			{
+				name: "a browser tag outside the fixed list is dropped"
+				in: {name: "Error", message: "m", browser: "Mozilla/5.0 (secret)"}
+				check: #"""
+					.browser == ""
 					"""#
 			},
 			{
