@@ -26,6 +26,8 @@ def main [] {
 	test_an_invalid_reference_pattern_is_refused
 	test_a_failed_job_makes_apply_exit_non_zero
 	test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches
+	test_a_failed_job_is_run_again_when_files_were_written
+	test_a_stale_new_file_is_replaced_not_reused
 	print "\nAll node host tests passed."
 }
 
@@ -82,6 +84,9 @@ def test_the_schema_defaults_and_refuses [] {
 	assert (not (host-with "{dockerGC: {refPattern: \"localhost\"}}").ok) "a pattern without ^"
 	assert (not (host-with "{dockerGC: {refPattern: \"^a'b\"}}").ok) "a quote in the pattern"
 	assert (not (host-with "{dockerGC: {onCalendar: \"\"}}").ok) "no schedule"
+	assert (not (host-with "{dockerGC: {refPattern: \"^a\\nb\"}}").ok) "a newline in the pattern"
+	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\\\\"}}").ok) "a trailing backslash in the schedule"
+	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\r\"}}").ok) "a carriage return in the schedule"
 	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\n[Service]\"}}").ok) "a schedule that starts another setting"
 	# A cache past the default cap needs a cap said: the default is not kept under the cache, or the job would fail every hour.
 	assert (not (host-with "{dockerGC: {buildCacheGB: 130}}").ok) "a cache past the default cap"
@@ -159,10 +164,16 @@ case "$1" in
   enable) touch "$d/on" ;;
   show) if [ -e "$d/needreload" ]; then echo yes; else echo no; fi ;;
   daemon-reload) rm -f "$d/needreload" ;;
+  start) [ "$STAYFAILED" = 1 ] || rm -f "$d/failed" ;;
   *) ;;
 esac
 ' | save --raw ($dir | path join bin systemctl)
 	chmod 755 ($dir | path join bin systemctl)
+	'#!/bin/bash
+shift
+exec "$@"
+' | save --raw ($dir | path join bin timeout)
+	chmod 755 ($dir | path join bin timeout)
 	"" | save --raw ($dir | path join systemctl.log)
 }
 
@@ -293,6 +304,57 @@ def test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches 
 		let after = (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l == "daemon-reload"} | length)
 		assert equal $after ($before + 1)
 		assert equal (apply (defaults) --check --root $root) [] "nothing pending after the reload"
+	}
+	rm -rf $dir
+}
+
+def test_a_failed_job_is_run_again_when_files_were_written [] {
+	print "test a job that failed is run again once its files are set right, and a repair exits 0 and says set; one that fails again exits 1..."
+	for stay in ["0" "1"] {
+		let dir = (tmp)
+		fake-systemctl $dir
+		let root = ($dir | path join root)
+		(defaults) | to json | save --raw ($dir | path join host.json)
+		# The settings drifted (the cause of the failure) and the job's last run failed.
+		with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { apply (defaults) --root $root | ignore }
+		"# drifted\n" | save --force --raw ($root + "/etc/pronto/docker-gc.env")
+		"" | save --raw ($dir | path join failed)
+		let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", STAYFAILED: $stay} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete })
+		assert str contains (open --raw ($dir | path join systemctl.log)) "start pronto-docker-gc.service"
+		if $stay == "0" {
+			assert equal $r.exit_code 0
+			assert str contains $r.stdout "node-host: set as #Host says"
+		} else {
+			assert equal $r.exit_code 1
+			assert str contains $r.stderr "set, but the job's last run still fails"
+		}
+		rm -rf $dir
+	}
+	# Nothing written and a failed job: it is not run again, the exit is 1, and "set" is not said.
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	(defaults) | to json | save --raw ($dir | path join host.json)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { apply (defaults) --root $root | ignore }
+	"" | save --raw ($dir | path join failed)
+	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete })
+	assert equal $r.exit_code 1
+	assert str contains $r.stderr "nothing to write, but the job's last run failed"
+	assert (not (open --raw ($dir | path join systemctl.log) | str contains "start pronto-docker-gc.service"))
+	rm -rf $dir
+}
+
+def test_a_stale_new_file_is_replaced_not_reused [] {
+	print "test a .new file left by an earlier run (another owner or mode) is removed before the write..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	mkdir ($root + "/etc/pronto")
+	"stale\n" | save --raw ($root + "/etc/pronto/docker-gc.env.new")
+	chmod 666 ($root + "/etc/pronto/docker-gc.env.new")
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (defaults) --root $root | ignore
+		assert equal (apply (defaults) --check --root $root) [] "the env file is whole, mode 644"
 	}
 	rm -rf $dir
 }

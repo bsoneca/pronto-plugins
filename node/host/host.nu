@@ -9,7 +9,8 @@
 # machine (as the node itself would), with it over ssh and sudo: each read, write and systemctl call is an ssh login of
 # its own (BatchMode, with a connect timeout), none retried, because a failed login gets the Mac banned by the node's
 # CrowdSec. --check changes nothing and exits 1 on any drift.
-# --root <dir> puts every path under it (for the tests).
+# --root <dir> puts every path under it (for the tests; then the owner compared is the user's alone, as a group may come
+# from the folder). Needs `cue` on the PATH, which vets the values against #Host before anything is written.
 
 const here = path self | path dirname
 
@@ -28,7 +29,10 @@ def lines [text: string]: nothing -> string { ($text | str trim --right --char "
 export def vet [host: record] {
 	let f = (mktemp --tmpdir node-host-vet-XXXXXX.json)
 	$host.dockerGC | to json | save --force --raw $f
-	let r = (do { ^cue vet -c ($here | path join schema host.cue) $f -d '#DockerGC' } | complete)
+	let r = (try { do { ^cue vet -c ($here | path join schema host.cue) $f -d '#DockerGC' } | complete } catch {
+		rm -f $f
+		error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
+	})
 	rm -f $f
 	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
 	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is an error there (status 2), which the cleanup loop
@@ -94,7 +98,10 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 		# 0666 settings file, or one a user owns, is drift (the script sources it as root).
 		let now = (must (sh $node $"if [ -e '($path)' ]; then cat '($path)'; fi") $"reading ($path)")
 		let meta = (must (sh $node $"if [ -e '($path)' ]; then stat -c '%a %U:%G' '($path)' 2>/dev/null || stat -f '%Lp %Su:%Sg' '($path)'; fi") $"reading the mode of ($path)" | str trim)
-		if $now == $f.text and $meta == $"($f.mode) ($owner)" { continue }
+		# Under --root (the tests) the group may come from the folder: the user alone is compared.
+		let have = if $root == "" { $meta } else { $meta | split row ":" | first }
+		let want = if $root == "" { $"($f.mode) ($owner)" } else { $"($f.mode) ($owner | split row ':' | first)" }
+		if $now == $f.text and $have == $want { continue }
 		let what = if $now == $f.text { $"has mode and owner ($meta), not ($f.mode) ($owner)" } else { "differs" }
 		$drift = ($drift | append $"($path) ($what)")
 		print $"drift: ($path) ($what)"
@@ -102,7 +109,7 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			# Whole beside the file, then renamed over it: a full disk leaves the old file.
 			let dir = ($path | path dirname)
 			let tmp = $"($path).new"
-			must (sh $node $"mkdir -p '($dir)' && cat > '($tmp)' && chmod ($f.mode) '($tmp)' && mv -f '($tmp)' '($path)' || { rm -f '($tmp)'; exit 1; }" $f.text) $"writing ($path)" | ignore
+			must (sh $node $"mkdir -p '($dir)' && rm -f '($tmp)' && cat > '($tmp)' && chmod ($f.mode) '($tmp)' && mv -f '($tmp)' '($path)' || { rm -f '($tmp)'; exit 1; }" $f.text) $"writing ($path)" | ignore
 			print $"wrote ($path)"
 			$changed = true
 		}
@@ -130,8 +137,23 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 	let failed = (sh $node $"systemctl is-failed --quiet ($service)")
 	if $failed.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed: ($failed.stderr | str trim)"} }
 	if $failed.exit_code == 0 {
-		$drift = ($drift | append $"($service) failed its last run")
 		print $"drift: ($service) failed its last run"
+		if $changed {
+			# The files it failed on are set right: run it again (a oneshot, under a timeout) and ask again, so a repair is not
+			# reported as a failure.
+			print $"running ($service) again"
+			sh $node $"timeout 600 systemctl start ($service)" | ignore
+			let again = (sh $node $"systemctl is-failed --quiet ($service)")
+			if $again.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed again: ($again.stderr | str trim)"} }
+			if $again.exit_code != 0 {
+				print $"($service) ran again and did not fail"
+				$drift = ($drift | append $"($service) failed its last run and was run again")
+			} else {
+				$drift = ($drift | append $"($service) failed its last run")
+			}
+		} else {
+			$drift = ($drift | append $"($service) failed its last run")
+		}
 	}
 	let state = (sh $node $"systemctl is-enabled --quiet ($gc_unit) && systemctl is-active --quiet ($gc_unit)")
 	if $state.exit_code == 255 { error make {msg: $"node-host: asking whether ($gc_unit) runs: ($state.stderr | str trim)"} }
@@ -160,8 +182,13 @@ def "main apply" [host: path, --check, --node: string = "", --root: string = ""]
 	let drift = (apply (open $host) --check=$check --node $node --root $root)
 	if ($drift | is-empty) { print "node-host: as #Host says"; return }
 	if $check { exit 1 }
-	# The files are set, but a failed job is not set right by writing them: exit non-zero, so the run is not read as clean.
-	if (failed-service $drift) { print --stderr "node-host: set, but the job's last run failed: read journalctl -u pronto-docker-gc.service"; exit 1 }
+	# A failed job that still fails (after being run again when files were written) is not set right by writing: exit non-zero,
+	# so the run is not read as clean. "set" is said only when something was written.
+	if (failed-service $drift) {
+		let wrote = ($drift | any {|d| not ($d | str ends-with "failed its last run") })
+		print --stderr (if $wrote { "node-host: set, but the job's last run still fails: read journalctl -u pronto-docker-gc.service" } else { "node-host: nothing to write, but the job's last run failed: read journalctl -u pronto-docker-gc.service" })
+		exit 1
+	}
 	print "node-host: set as #Host says"
 }
 

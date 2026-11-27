@@ -54,11 +54,12 @@ package schema
 #DockerGC: {
 	minAgeHours: *6 | (int & >=1)
 	// A bash ERE, kept inside single quotes in /etc/pronto/docker-gc.env, so it holds none.
-	refPattern:   *"^localhost:[0-9]+/" | (string & =~"^\\^[^']*$")
+	refPattern:   *"^localhost:[0-9]+/" | (string & =~"^\\^[^'\n]*$")
 	buildCacheGB: *40 | (int & >0)
 	// The default is not kept when it would not exceed the cache: a larger cache needs a larger cap said.
 	capGB: (*120 | int) & >buildCacheGB
 	// A systemd OnCalendar expression.
-	// One line: it is written into a unit file, where a newline would start another setting.
-	onCalendar: *"hourly" | (string & =~"^[^\n]+$")
+	// One line, and no backslash (a trailing one continues the line and breaks the timer): it is written into a unit file,
+	// where a newline would start another setting.
+	onCalendar: *"hourly" | (string & =~"^[^\n\r\\\\]+$")
 }
