@@ -76,6 +76,10 @@ check("an encoded address in a path segment is scrubbed", lines[2] === "c (/user
 check("a token in a path segment is scrubbed", lines[3] === "d (/u/<token>/b.js:7:8)");
 check("a file named keyJson.js is kept", lines[4] === "e (/assets/keyJson.js:9:10)");
 
+// A malformed escape hides an encoded address in the same segment: the segment goes as a marker.
+const malformed = thrown(withStack("x", ["h (https://x.example/users/ana%40gmail.com%E0%A4%A/app.js:1:2)", "i (https://x.example/ok/app.js:3:4)"]), { detail: true });
+check("a segment that fails to decode is a fixed marker, its address nowhere", malformed.stack === "h (/users/<undecodable>/app.js:1:2)\ni (/ok/app.js:3:4)" && !JSON.stringify(malformed).includes("ana") && !JSON.stringify(malformed).includes("gmail"));
+
 // The message: redacted in the page.
 const message = thrown(withStack("failed for ana@example.com at https://x.example/p?q=1", ["f (/a.js:1:2)"]), { detail: true });
 check("a message loses its address and url", message.message === "failed for <email> at <url>");

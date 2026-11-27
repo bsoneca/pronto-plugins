@@ -167,6 +167,9 @@ export default function mount() {
 	// alone. It is asked on its own: a lookup that stalls never holds GlitchTip's reports.
 	flagOn(config.detailFlag).then((detail) => {
 		globalThis.__prontoErrorDetail = detail;
+		// Whether the detail is on is the page's to show too, apart from `data-errors` (GlitchTip's own): a
+		// check that throws to see the detail waits for it, never a sleep. Unnamed, it settles "off" at once.
+		document.documentElement.dataset.errorDetail = detail ? "on" : "off";
 	});
 	Promise.all([flagOn(config.flag), releaseOf()]).then(([on, id]) => {
 		release = id;

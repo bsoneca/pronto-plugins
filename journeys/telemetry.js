@@ -143,11 +143,13 @@ if (!globalThis.__prontoJourneys) {
 		path
 			.split("/")
 			.map((segment) => {
-				let read = segment;
+				let read;
 				try {
 					read = decodeURIComponent(segment);
 				} catch {
-					// not encoded: as written
+					// A malformed escape ("%E0%A4%A") hides whatever else the segment holds, an encoded address
+					// included: it is sent as a fixed marker, never as written.
+					return "<undecodable>";
 				}
 				const clean = scrub(read);
 				return clean === read ? segment : clean;
