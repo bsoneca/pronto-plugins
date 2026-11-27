@@ -2469,6 +2469,17 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "a Cluster on an unapproved digest under the tenant's own base name", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database-base:18@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "")}
 		{why: "the approved digest under another app's base name", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/other-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
 		{why: "the approved digest under another major", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database-base:17@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
+		{why: "a command parameter", says: "sets the Postgres parameter archive_command", objects: (do $cluster_with $approved "postgresql: {parameters: {archive_command: \"curl evil\"}}")}
+		{why: "a restore_command parameter", says: "sets the Postgres parameter restore_command", objects: (do $cluster_with $approved "postgresql: {parameters: {restore_command: \"x\"}}")}
+		{why: "a preload library parameter", says: "sets the Postgres parameter shared_preload_libraries", objects: (do $cluster_with $approved "postgresql: {parameters: {shared_preload_libraries: \"evil\"}}")}
+		{why: "a library parameter", says: "sets the Postgres parameter dynamic_library_path", objects: (do $cluster_with $approved "postgresql: {parameters: {dynamic_library_path: \"/tmp\"}}")}
+		{why: "a file parameter", says: "sets the Postgres parameter hba_file", objects: (do $cluster_with $approved "postgresql: {parameters: {hba_file: \"/tmp/x\"}}")}
+		{why: "an ssl file parameter", says: "sets the Postgres parameter ssl_cert_file", objects: (do $cluster_with $approved "postgresql: {parameters: {ssl_cert_file: \"/etc/x\"}}")}
+		{why: "a recovery parameter", says: "sets the Postgres parameter recovery_target", objects: (do $cluster_with $approved "postgresql: {parameters: {recovery_target: \"immediate\"}}")}
+		{why: "a tuning parameter past its bound", says: "outside what a tenant's database may have", objects: (do $cluster_with $approved "postgresql: {parameters: {max_connections: \"100000\"}}")}
+		{why: "a memory parameter past its bound", says: "sets shared_buffers to 1TB, outside", objects: (do $cluster_with $approved "postgresql: {parameters: {shared_buffers: \"1TB\"}}")}
+		{why: "a tuning parameter that is not a number", says: "which is not a int value", objects: (do $cluster_with $approved "postgresql: {parameters: {max_connections: \"200; drop\"}}")}
+		{why: "a wal_level that is not allowed", says: "not one of replica, logical", objects: (do $cluster_with $approved "postgresql: {parameters: {wal_level: \"minimal\"}}")}
 		{why: "an imageCatalogRef", says: "sets the Cluster field(s) imageCatalogRef", objects: (do $cluster_with $approved "imageCatalogRef: {name: \"x\", kind: \"ImageCatalog\", major: 18}")}
 		{why: "an image-volume extension", says: "sets postgresql.extensions", objects: (do $cluster_with $approved "postgresql: {extensions: [{name: \"x\", image: {reference: \"evil\"}}]}")}
 		{why: "a projectedVolumeTemplate", says: "sets the Cluster field(s) projectedVolumeTemplate", objects: (do $cluster_with $approved "projectedVolumeTemplate: {sources: []}")}
@@ -2629,11 +2640,33 @@ def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {
 	print "test a tenant's Cluster with the engine's own #Tune fields (multi-instance: primaryUpdateStrategy, primaryUpdateMethod, enablePDB) and the base's uid 999 passes, and a database login that is a member of postgres or a file or program role is a violation..."
 	let ns = $tenant_ns
 	let approved = "127.0.0.1:5000/($ns)/game-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598"
-	let cluster = $"{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"127.0.0.1:5000/($ns)/game-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598\", instances: 3, primaryUpdateStrategy: \"unsupervised\", primaryUpdateMethod: \"switchover\", enablePDB: false, postgresUID: 999, postgresGID: 999}}"
+	let cluster = $"{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"127.0.0.1:5000/($ns)/game-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598\", instances: 3, primaryUpdateStrategy: \"unsupervised\", primaryUpdateMethod: \"switchover\", enablePDB: false, enableSuperuserAccess: false, postgresUID: 999, postgresGID: 999}}"
 	let w = (tenant-world)
 	let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($cluster)] {namespace: ($ns), name: game} [postgresql.cnpg.io/v1/Cluster]"
 	let r = (in-world $w -c $body)
 	assert equal $r.exit_code 0 $"the engine's own Cluster tuning was refused: ($r.stderr)"
+	# a Cluster that leaves the superuser on, names a superuserSecret, or tunes with a parameter that runs a program is a violation as written…
+	for row in [
+		{why: "the superuser left on", from: "enableSuperuserAccess: false", to: "enableSuperuserAccess: true", says: "does not set enableSuperuserAccess: false"}
+		{why: "no word on the superuser", from: "enableSuperuserAccess: false, ", to: "", says: "does not set enableSuperuserAccess: false"}
+		{why: "a superuserSecret", from: "enableSuperuserAccess: false", to: "enableSuperuserAccess: false, superuserSecret: {name: x}", says: "sets superuserSecret"}
+		{why: "an archive_command", from: "instances: 3", to: "instances: 3, postgresql: {parameters: {archive_command: \"x\"}}", says: "sets the Postgres parameter archive_command"}
+		{why: "a value past its bound", from: "instances: 3", to: "instances: 3, postgresql: {parameters: {work_mem: \"2GB\"}}", says: "sets work_mem to 2GB, outside what a tenant's database may have"}
+	] {
+		let bad = ($body | str replace $row.from $row.to)
+		assert ($bad != $body) $"($row.why): the case did not change the Cluster"
+		let rr = (in-world $w -c $bad)
+		assert ($rr.exit_code != 0) $"($row.why): was not refused"
+		assert (has $rr.stderr $row.says) $"($row.why): ($rr.stderr)"
+	}
+	# …and tuning within its bounds passes
+	let tuned = ($body | str replace "instances: 3" "instances: 3, postgresql: {parameters: {max_connections: \"200\", shared_buffers: \"512MB\", work_mem: \"16MB\", statement_timeout: \"30s\", wal_level: \"logical\", fsync: \"on\"}}")
+	let ok = (in-world $w -c $tuned)
+	assert equal $ok.exit_code 0 $"tuning within its bounds was refused: ($ok.stderr)"
+	# harden-objects says what upstream's Cluster leaves on: the superuser and its secret
+	let hard = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant harden-objects [{kind: Cluster, spec: {enableSuperuserAccess: true, superuserSecret: {name: x}, instances: 1}}] | to json --raw")
+	assert equal $hard.exit_code 0 $hard.stderr
+	assert equal ($hard.stdout | from json | get 0.spec) {enableSuperuserAccess: false, instances: 1}
 	rm -rf $w.dir
 }
 

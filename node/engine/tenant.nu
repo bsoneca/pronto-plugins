@@ -285,9 +285,50 @@ export def harden-objects [objects: list]: nothing -> list {
 	$objects | each {|o|
 		match ($o.kind? | default "") {
 			"Deployment" | "Job" => { if ($o.spec?.template?.spec? | default null) == null { $o } else { $o | update spec.template.spec (do $boxed $o.spec.template.spec) } }
+			# Upstream renders the postgres superuser on (`enableSuperuserAccess: true` and a `superuserSecret`): a tenant's database has none, so the engine says
+			# so before check-objects holds the Cluster to it. What upstream's schema and migration Jobs connect as with that password (PRONTO-2066) is theirs to move.
+			"Cluster" => { $o | update spec (($o.spec? | default {}) | reject -o superuserSecret | upsert enableSuperuserAccess false) }
 			_ => $o
 		}
 	}
+}
+
+# A Postgres setting's value in the unit its bound is in (`#TenantParameters`): null when it is not written as that kind of value.
+def parameter-value [kind: string, raw: any]: nothing -> any {
+	let text = ($raw | into string | str trim)
+	match $kind {
+		"int" => { if $text =~ '^-?[0-9]+$' { $text | into int } else { null } }
+		"real" => { if $text =~ '^-?[0-9]+(\.[0-9]+)?$' { $text | into float } else { null } }
+		"mem" => {
+			let m = ($text | parse --regex '^(?<n>[0-9]+)(?<u>kB|MB|GB|TB)?$')
+			if ($m | is-empty) { null } else {
+				($m.0.n | into int) * (match $m.0.u { "MB" => 1024, "GB" => 1048576, "TB" => 1073741824, _ => 1 })
+			}
+		}
+		"ms" => {
+			let m = ($text | parse --regex '^(?<n>-?[0-9]+)(?<u>ms|s|min|h|d)?$')
+			if ($m | is-empty) { null } else {
+				($m.0.n | into int) * (match $m.0.u { "s" => 1000, "min" => 60000, "h" => 3600000, "d" => 86400000, _ => 1 })
+			}
+		}
+		_ => null
+	}
+}
+
+# What a tenant's Cluster says about its Postgres settings that `#TenantParameters` refuses: a name it does not list, or a value out of its bound.
+def parameter-problems [parameters: record]: nothing -> list<string> {
+	let allowed = (schema-export '#TenantParameters')
+	$parameters | transpose name value | each {|p|
+		let rule = ($allowed | get -o $p.name)
+		if $rule == null {
+			$"sets the Postgres parameter ($p.name), which a tenant's database may not"
+		} else if $rule.kind == "enum" {
+			if ($p.value | into string) not-in $rule.values { $"sets ($p.name) to ($p.value), not one of ($rule.values | str join ', ')" }
+		} else {
+			let v = (parameter-value $rule.kind $p.value)
+			if $v == null { $"sets ($p.name) to ($p.value), which is not a ($rule.kind) value" } else if $v < $rule.min or $v > $rule.max { $"sets ($p.name) to ($p.value), outside what a tenant's database may have" }
+		}
+	} | compact
 }
 
 # What the engine's CUE refuses, checked again in nushell over the objects the game's own release.cue rendered (its `nodeManifests` is
@@ -358,6 +399,10 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			let cspec = ($o.spec? | default {})
 			let extra = ($cspec | columns | where {|k| $k not-in $allowed.keys })
 			if ($extra | is-not-empty) { $why = ($why | append $"($id) sets the Cluster field\(s\) ($extra | str join ', '), which a tenant's database may not: its image and what runs in its pod are the engine's") }
+			# no access as the postgres superuser, whose password Secret CloudNativePG would make (a superuser reaches the pod: COPY ... TO PROGRAM)
+			if ($cspec.enableSuperuserAccess? | default null) != false { $why = ($why | append $"($id) does not set enableSuperuserAccess: false: a tenant's database has no superuser access") }
+			if ($cspec | get -o superuserSecret | default null) != null { $why = ($why | append $"($id) sets superuserSecret, which a tenant's database may not") }
+			for problem in (parameter-problems ($cspec.postgresql?.parameters? | default {})) { $why = ($why | append $"($id) ($problem)") }
 			let uid = ($cspec | get -o postgresUID | default 999)
 			let gid = ($cspec | get -o postgresGID | default 999)
 			if $uid != $allowed.uid or $gid != $allowed.uid { $why = ($why | append $"($id) runs the database as uid ($uid) and gid ($gid): a tenant's database is the approved base's, uid ($allowed.uid)") }
