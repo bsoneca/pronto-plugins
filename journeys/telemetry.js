@@ -12,8 +12,10 @@
 // Names follow the markup as journeys_gestures.cue derives them: a data-on-*
 // handler by its module, a form by its id, else its action and entity joined
 // by "-", else "form". Nothing a reader typed and no row leaves the page; an error
-// leaves as its name, a trimmed message, its top stack frame and the screen it
-// happened on, which the collector redacts and writes as a log line (prod-watch).
+// leaves as its name alone and, only while the app's error-detail flag is on
+// (globalThis.__prontoErrorDetail, set by pronto-errors), also a redacted message, its
+// top script frames, a browser tag and the screen it happened on, which the collector
+// redacts again and writes as a log line (prod-watch).
 
 const ENDPOINT = "__ENDPOINT__";
 const READER = ["click", "dblclick", "change", "submit", "keydown", "drop"];
@@ -100,7 +102,7 @@ const leave = () => {
 
 // Once per page, not per screen: what the last page kept goes first, the last
 // batch goes when the page does, and a throw nobody caught is reported by its
-// class alone.
+// name alone, or with its detail while the error-detail flag is on.
 if (!globalThis.__prontoJourneys) {
 	globalThis.__prontoJourneys = true;
 	try {

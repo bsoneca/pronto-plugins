@@ -103,5 +103,6 @@ _d: #Errors & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", detailFlag: 
 detailLoader:    _d.out["errors.loader.json"] & {detailFlag: "error_detail"}
 detailScenario:  _d.out["errors.scenarios.json"].error_detail.flags & ["error_detail"]
 detailProduction: _d.out["errors.scenarios.json"].error_detail_tester.production & true
-detailUnnamed:   (_e.out["errors.scenarios.json"] & {error_detail?: _|_})
+detailUnnamed:   list.SortStrings([for k, _ in _e.out["errors.scenarios.json"] {k}]) & ["error_tracking", "error_tracking_tester"]
+detailNamed:     list.SortStrings([for k, _ in _d.out["errors.scenarios.json"] {k}]) & ["error_detail", "error_detail_tester", "error_tracking", "error_tracking_tester"]
 reporterDetail:  strings.Contains(_reporter, "globalThis.__prontoErrorDetail = detail;") & true

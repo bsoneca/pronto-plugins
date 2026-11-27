@@ -49,7 +49,7 @@ import "strings"
 	// The pronto-flags flag (flags_spec.cue, default false where the app is released, local true) that lets
 	// pronto-journeys' reporter send an error's message, frames, stack and browser tag. Unnamed or off, an
 	// error leaves as its name alone. It has scenarios of its own, beside the reporter's, once named.
-	detailFlag: *"" | =~"^[a-z][a-z0-9_-]{0,63}$"
+	detailFlag: *"" | (=~"^[a-z][a-z0-9_-]{0,63}$" & !=E.flag)
 	// Where the journeys reporter's batches go on the page's own origin.
 	detailBeacon: *"/telemetry" | =~"^/[a-z0-9_/-]+$"
 
@@ -108,7 +108,7 @@ import "strings"
 						actors: eli: name: "Eli"
 						steps: [
 							{by: "eli", open: "/?probe={run}", flag: E.detailFlag},
-							{by: "eli", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "\"type\":\"error\".*\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "scenario-detail-{run}"}}, why: "the uncaught error leaves as a beacon with its browser tag, which it carries only while the flag is on", flag: E.detailFlag},
+							{by: "eli", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "^(?!.*probe=).*\"type\":\"error\".*\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "scenario-detail-{run}"}}, why: "the uncaught error leaves as a beacon with its browser tag, which it carries only while the flag is on, and nothing of the page's query", flag: E.detailFlag},
 						]
 					}
 					"\(E.detailFlag)_tester": {
