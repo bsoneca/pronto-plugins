@@ -670,7 +670,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded. A container that
 	# leaves allowPrivilegeEscalation unset is made to say false first, and what it will retire is the engine's to decide, before any write.
 	let objects = if $tenant { tenant harden-objects $objects } else { $objects }
-	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) }
+	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant live-clusters $node.namespace) }
 	let retire = if $tenant { tenant check-retire $node (tenant retire-kinds) $objects } else { $node.retire }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })
@@ -861,7 +861,8 @@ def release-tenant [app_info: record, tenant: string, host: string, push_kubecon
 		# A dry run with no build holds no lease: no push identity is asked for.
 		if $lease != "" { tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live } }
 		let pushed = if $check and not $build {
-			render placeholder-pushed $services "release"
+			let placeholders = (render placeholder-pushed $services "release")
+			if "database" in $services { let b = (tenant database-images | first); $placeholders | insert "database-base" {tag: $b.major, digest: $b.digest} } else { $placeholders }
 		} else {
 			print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the tenants' buildkitd"
 			push tenant-images $app_info.dir $node $services (if $check { "check" } else { "release" }) $push_kubeconfig

@@ -243,6 +243,17 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		# The staged copy is what bake may read: a path the project names inside the app's own folder (an absolute build context a flatten wrote)
 		# is the staged copy's, so the grant below covers it and nothing outside the app is added to it.
 		runtime release-tree (rebase-paths $compose.stdout $dir $staged) | save -f ($work | path join release.compose.yaml)
+		# The Cluster runs the engine's approved database base, never the tenant's: the database stage must only copy SQL onto a base the engine approves (#TenantDatabaseImages).
+		# Said before anything is built; the engine's own ref is what is copied below.
+		let approved_base = if "database" in $services {
+			let base = ($compose.stdout | render database-base)
+			let ok = (tenant approved-database-base $base (tenant database-images))
+			if $ok == null {
+				let what = if $base == null { "does more than copy SQL onto a base pinned by digest (a RUN, an ADD, an ENV, a copy from another stage or into postgres's own folders)" } else { $"sits on ($base.ref), which the engine does not approve" }
+				error make {msg: $"a game's database stage ($what): a tenant's database runs an approved database image \(mecha's, by digest\) and its stage only copies SQL onto it. A new extension is a new mecha release the engine approves first."}
+			}
+			$ok
+		} else { null }
 		let out = ($work | path join oci)
 		mkdir $out
 		let sets = ($services | each {|s| ["--set" $"($s).output=type=oci,dest=($out)/($s).tar" "--set" $"($s).tags="] } | flatten)
@@ -264,15 +275,25 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 				let digest = ($"($r.stdout)($r.stderr)" | lines | each {|l| $l | parse --regex '@(?<d>sha256:[0-9a-f]{64})' | get -o d.0 } | compact | last)
 				{svc: $svc, repo: $repo, digest: $digest}
 			})
-			let lost = (registry lost-images $registry ($built | each {|b| {repo: $b.repo, digest: $b.digest} }))
+			# The approved base, the engine's own ref, copied to the tenant's path under its Postgres major, and read back at the digest the engine approved.
+			let base_pushed = if $approved_base == null { null } else {
+				let repo = $"($ns)/($app)-database-base"
+				let copy = (^crane copy --insecure $approved_base.ref $"($registry)/($repo):($approved_base.major)" | complete)
+				if $copy.exit_code != 0 { error make {msg: $"crane copy ($approved_base.ref) to the node's registry: ($copy.stderr | str trim)"} }
+				let got = (^crane digest --insecure $"($registry)/($repo):($approved_base.major)" | complete)
+				if $got.exit_code != 0 or ($got.stdout | str trim) != $approved_base.digest { error make {msg: $"the copied database base at ($repo):($approved_base.major) is ($got.stdout | str trim), not the approved ($approved_base.digest)"} }
+				{repo: $repo, digest: $approved_base.digest, major: $approved_base.major}
+			}
+			let lost = (registry lost-images $registry (($built | each {|b| {repo: $b.repo, digest: $b.digest} }) | append (if $base_pushed == null { [] } else { [{repo: $base_pushed.repo, digest: $base_pushed.digest}] })))
 			if ($lost | is-not-empty) {
 				let names = ($lost | each {|i| $"($i.repo)@($i.digest)" } | str join ", ")
 				error make {msg: $"registry lost ($names) after the push: a tenant's release cannot restart the registry, so nothing is rolled out; publish again"}
 			}
-			$built | each {|b|
+			let result = ($built | each {|b|
 				let final = if $b.svc == "database" { render database-tag $registry $b.repo $b.digest } else { $tag }
 				[$b.svc {tag: $final, digest: $b.digest}]
-			} | into record
+			} | into record)
+			if $base_pushed == null { $result } else { $result | insert "database-base" {tag: $base_pushed.major, digest: $base_pushed.digest} }
 		})
 		$pushed
 	} finally {

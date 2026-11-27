@@ -172,6 +172,34 @@ import (
 // choice of issuer would make the builder its proxy. Today the one sign-in broker Studio's games use (apps/studio games.cue `signIn`).
 #TenantIssuers: ["https://id.bonkchess.com"]
 
+// The database images a tenant's Cluster may run (PRONTO-740, Codex): mecha's database image, by digest, as the validated pronto runtimes' generated database stages name it
+// (`FROM bonitao/mecha-database:<version>@sha256:...` plus COPYs of the app's SQL, which render.nu's database-base reads). A tenant builds its own database image from its
+// own Dockerfile, so running that image in the operator-created instance pod would run tenant code there; the Cluster runs the engine's approved base instead, copied into
+// the tenant's own registry path (`<registry>/<namespace>/<app>-database-base:<major>`), and the full tenant image stays with the schema and migration Jobs. `major` is the
+// base's PG_MAJOR (`crane config` at the time it is added: 18 for mecha-database 0.36.1). One entry for each mecha database the validated runtimes generate: pronto 1.17 and 1.18
+// both name 0.36.1, so a pin move that adds a runtime adds its mecha digest here in the same change, and keeps the previous runtime's (N and N-1).
+#TenantDatabaseImages: [...{ref: string, digest: =~"^sha256:[0-9a-f]{64}$", major: =~"^[0-9]+$"}] & [
+	{ref: "bonitao/mecha-database:0.36.1@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", digest: "sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", major: "18"},
+]
+
+// The fields a tenant's Cluster may carry (PRONTO-740, Codex): what upstream renders and the engine patches, and nothing else, since a Cluster field is how tenant code or an
+// image the tenant chose could reach the operator-created instance pod: imageCatalogRef, postgresql.extensions[].image (image-volume extensions), projectedVolumeTemplate,
+// serviceAccountTemplate, plugins, env, envFrom, bootstrap.initdb's postInit*SQL*, import, recovery and externalClusters are all refused, and so is any key not listed.
+#TenantClusterSpec: {
+	// The first line is what upstream renders and the second what the engine's own #Tune patches in (multi-instance databases, enablePDB).
+	keys: ["instances", "postgresql", "imageName", "postgresUID", "postgresGID", "enableSuperuserAccess", "superuserSecret", "managed", "bootstrap", "storage", "resources", "replicationSlots", "stopDelay", "smartShutdownTimeout",
+		"primaryUpdateStrategy", "primaryUpdateMethod", "enablePDB"]
+	// The uid and gid of mecha's database image (upstream's own, whose postgres user is 999, not CloudNativePG's 26): the approved base is the one image a tenant's Cluster runs.
+	uid: 999
+	postgresql: ["parameters", "synchronous"]
+	bootstrap: ["initdb"]
+	initdb: ["database", "owner", "localeProvider", "icuLocale", "secret"]
+}
+
+// Roles a tenant's database may never be made a member of, and never given as its own attributes (superuser, createrole): through them SQL reaches the instance pod
+// (COPY ... TO PROGRAM, server-side file reads and writes) or the cluster's own roles. A managed role of a tenant's Cluster and a `database.logins` entry are held to it.
+#TenantRefusedRoles: ["postgres", "pg_execute_server_program", "pg_read_server_files", "pg_write_server_files"]
+
 // The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
 // is a patch: where `database` is not set, upstream's Cluster is applied as it renders.
 #Database: {
@@ -472,7 +500,7 @@ import (
 	// full image copies, moves the Jobs' image and leaves the Cluster's: CloudNativePG recreates the instance on any change
 	// to `imageName` (PRONTO-615, as PRONTO-537 for Bonk Chess).
 	let dbBase = [
-		if !publisher if app.image != _|_ if app.image.pushed != _|_ if app.image.pushed["database-base"] != _|_ {
+		if app.image != _|_ if app.image.pushed != _|_ if app.image.pushed["database-base"] != _|_ {
 			"\(release.environment.registry)/\(release.name)-database-base:\(app.image.pushed["database-base"].tag)@\(app.image.pushed["database-base"].digest)"
 		},
 	]
@@ -676,6 +704,10 @@ import (
 			"database.logins generate their passwords in the namespace, which the app's externalSecrets store does not do yet"
 		}],
 		// What a tenant's release (a namespace's publisher) may not write or ask (PRONTO-740 S2).
+		[if publisher if release.database != _|_ for l, v in release.database.logins for r in v.inRoles if list.Contains(#TenantRefusedRoles, r) {
+			"database.logins.\(l) is a member of \(r), which a tenant's database never is (#TenantRefusedRoles)"
+		}],
+		[if publisher if len(dbBase) == 0 for o in _all if o.kind == "Cluster" {"Cluster/\(o.metadata.name) has no approved database base pushed: a tenant's Cluster runs the engine's approved image (#TenantDatabaseImages), copied to its own registry path"}],
 		[if publisher if !production {"a tenant's release (\(release.namespace)) is never a preview"}],
 		[if publisher if release.backups != _|_ {"a tenant's release writes no backups: database.backup and backups are the operator's"}],
 		[if publisher if len(release.tenant.egress) > 0 {"a tenant's release writes no NetworkPolicy: tenant.egress is its namespace's provisioner's"}],

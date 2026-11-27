@@ -1,0 +1,2 @@
+FROM base AS database
+COPY ./sql/ /docker-entrypoint-initdb.d/

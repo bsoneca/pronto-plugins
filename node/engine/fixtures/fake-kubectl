@@ -374,6 +374,11 @@ if verb == "get":
     if what == "job":
         name = args[2]
         out({"status": {"failed": 1} if exists("job_fail") else {"succeeded": 1}})
+    if what.startswith("clusters.postgresql.cnpg.io"):
+        # the Clusters already in the namespace (`live_clusters`, names one a line): what a tenant's preflight lists
+        if not exists("live_clusters"):
+            sys.exit(0)
+        out({"items": [{"metadata": {"name": n}} for n in read("live_clusters").split()]})
     if what.startswith("cluster.postgresql.cnpg.io"):
         if exists("read_fail_cluster"):
             fail("Unable to connect to the server: net/http: TLS handshake timeout")
