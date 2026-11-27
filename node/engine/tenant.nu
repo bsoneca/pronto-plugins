@@ -294,7 +294,7 @@ export def harden-objects [objects: list]: nothing -> list {
 }
 
 # A Postgres setting's value in the unit its bound is in (`#TenantParameters`): null when it is not written as that kind of value.
-def parameter-value [kind: string, raw: any]: nothing -> any {
+def parameter-value [kind: string, raw: any, base: int = 1]: nothing -> any {
 	let text = ($raw | into string | str trim)
 	match $kind {
 		"int" => { if $text =~ '^-?[0-9]+$' { $text | into int } else { null } }
@@ -302,7 +302,7 @@ def parameter-value [kind: string, raw: any]: nothing -> any {
 		"mem" => {
 			let m = ($text | parse --regex '^(?<n>[0-9]+)(?<u>kB|MB|GB|TB)?$')
 			if ($m | is-empty) { null } else {
-				($m.0.n | into int) * (match $m.0.u { "MB" => 1024, "GB" => 1048576, "TB" => 1073741824, _ => 1 })
+				($m.0.n | into int) * (match $m.0.u { "kB" => 1, "MB" => 1024, "GB" => 1048576, "TB" => 1073741824, _ => $base })
 			}
 		}
 		"ms" => {
@@ -325,7 +325,7 @@ def parameter-problems [parameters: record]: nothing -> list<string> {
 		} else if $rule.kind == "enum" {
 			if ($p.value | into string) not-in $rule.values { $"sets ($p.name) to ($p.value), not one of ($rule.values | str join ', ')" }
 		} else {
-			let v = (parameter-value $rule.kind $p.value)
+			let v = (parameter-value $rule.kind $p.value ($rule | get -o base | default 1))
 			if $v == null { $"sets ($p.name) to ($p.value), which is not a ($rule.kind) value" } else if $v < $rule.min or $v > $rule.max { $"sets ($p.name) to ($p.value), outside what a tenant's database may have" }
 		}
 	} | compact
@@ -338,6 +338,12 @@ def parameter-problems [parameters: record]: nothing -> list<string> {
 # seccomp or AppArmor. Said before anything is applied or asked of the server.
 # The names of the Clusters the tenant's namespace already holds, as its publisher reads them: an older database, named as its author liked, whose operator-made
 # service account (`<cluster>-db`, or the name the operator gave it then) no workload of this release may run as.
+export def approved-cluster-image [image: any, node: record]: nothing -> bool {
+	if $image == null or ($image | describe) != "string" { return false }
+	let prefix = $"127.0.0.1:5000/($node.namespace)/"
+	(schema-export '#TenantDatabaseImages' | any {|a| $image == $"($prefix)($node.name)-database-base:($a.major)@($a.digest)" })
+}
+
 export def live-clusters [namespace: string]: nothing -> list<string> {
 	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
 	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
@@ -353,6 +359,8 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 	# the database operator names a Cluster's service account after the Cluster, and a Cluster is named as its author likes: every Cluster's
 	# name is an account no pod of the release runs as (and the release's own is `<release>-db`, nothing else)
 	let clusters = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|o| $o.metadata?.name? | default "" } | append $live | uniq)
+	# the secrets that hold the postgres superuser's password: each Cluster's superuserSecret and its `<cluster>-superuser` (the bootstrap secret is the owner's, and a reserved owner is refused above)
+	let guarded_secrets = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|c| [($c.spec?.superuserSecret?.name? | default "")] } | flatten | append ($clusters | each {|c| $"($c)-superuser" }) | where {|n| $n != "" } | uniq)
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
 		mut why = []
@@ -408,7 +416,19 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			if $uid != $allowed.uid or $gid != $allowed.uid { $why = ($why | append $"($id) runs the database as uid ($uid) and gid ($gid): a tenant's database is the approved base's, uid ($allowed.uid)") }
 			# a managed role is a login of the database (never a superuser, never one that creates roles, never a member of a role that reaches the pod or the cluster)
 			let refused_roles = (schema-export '#TenantRefusedRoles')
+			let refused_prefixes = (schema-export '#TenantRefusedRolePrefixes')
+			let reserved_role = {|n: string| ($n in $refused_roles) or ($refused_prefixes | any {|p| $n | str starts-with $p }) }
+			# the database's owner is a role CloudNativePG sets the password of from the bootstrap secret on every reconcile: never one that is the postgres superuser or the operator's own
+			let owner = ($cspec.bootstrap?.initdb?.owner? | default "")
+			if $owner != "" and (do $reserved_role $owner) { $why = ($why | append $"($id) makes the database's owner ($owner), a role a tenant's database never has: CloudNativePG would set its password from the bootstrap secret, which the tenant's pods read") }
+			if ($cspec.storage? | default {} | columns | any {|k| $k not-in (schema-export '#TenantStorageKeys') }) { $why = ($why | append $"($id) sets storage fields other than size and storageClass") }
+			let max_stop = (schema-export '#TenantMaxStopSeconds')
+			for key in [stopDelay smartShutdownTimeout] {
+				let v = ($cspec | get -o $key | default null)
+				if $v != null and (($v | describe) != "int" or $v > $max_stop or $v < 0) { $why = ($why | append $"($id) sets ($key) to ($v), past the ($max_stop) seconds a tenant's database may wait") }
+			}
 			for role in ($cspec.managed?.roles? | default []) {
+				if (do $reserved_role ($role.name? | default "")) { $why = ($why | append $"($id) manages the role ($role.name? | default '?'), a name a tenant's database never has") }
 				if ($role.superuser? | default false) == true { $why = ($why | append $"($id) manages the role ($role.name? | default '?') as a superuser") }
 				if ($role.createrole? | default false) == true { $why = ($why | append $"($id) manages the role ($role.name? | default '?') with createrole") }
 				let member = ($role.inRoles? | default [] | where {|r| $r in $refused_roles })
@@ -423,6 +443,20 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			# a Service the operator makes for the database must stay inside the cluster: a LoadBalancer or NodePort one would publish it
 			let outward = ($o.spec?.managed?.services?.additional? | default [] | where {|a| ($a.serviceTemplate?.spec?.type? | default "ClusterIP") != "ClusterIP" or ($a.serviceTemplate?.spec?.externalIPs? | default [] | is-not-empty) })
 			if ($outward | is-not-empty) { $why = ($why | append $"($id) has a managed Service that is not a ClusterIP, or names externalIPs") }
+		}
+		# a pod that reads the postgres superuser's password (the secret of the Cluster's bootstrap owner, `<app>-db-postgres`, `<cluster>-superuser`) could log in as it and run a program
+		# in the instance pod: refused before anything is written. Upstream's release reads it in its Jobs and services (PRONTO-2066): until that moves, an upstream render is refused here.
+		let pod_spec = (match ($o.kind? | default "") { "Deployment" | "Job" => $o.spec?.template?.spec?, "CronJob" => $o.spec?.jobTemplate?.spec?.template?.spec?, _ => null })
+		if $pod_spec != null {
+			let guarded = ($guarded_secrets | append $"($node.name? | default '')-db-postgres" | where {|n| $n != "-db-postgres" })
+			let refs = (
+				(($pod_spec.containers? | default []) | append ($pod_spec.initContainers? | default []) | append ($pod_spec.ephemeralContainers? | default []) | each {|c|
+					($c.env? | default [] | each {|e| $e.valueFrom?.secretKeyRef?.name? | default "" }) | append ($c.envFrom? | default [] | each {|e| $e.secretRef?.name? | default "" })
+				} | flatten)
+				| append ($pod_spec.volumes? | default [] | each {|v| [($v.secret?.secretName? | default "")] | append ($v.projected?.sources? | default [] | each {|s| $s.secret?.name? | default "" }) } | flatten)
+			)
+			let reads = ($refs | where {|n| $n in $guarded } | uniq)
+			if ($reads | is-not-empty) { $why = ($why | append $"($id) reads the secret\(s\) ($reads | str join ', '), the postgres superuser's password: a tenant's workload never does") }
 		}
 		let spec = (if ($o.kind? | default "") in [Deployment Job] { $o.spec?.template?.spec? } else { null })
 		if $spec != null {

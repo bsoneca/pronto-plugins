@@ -199,19 +199,19 @@ import (
 // The Postgres parameters a tenant's Cluster may set (PRONTO-740, Codex): tuning only, each held to a bound. Every other one is refused, among them each `*_command`
 // (archive, restore, recovery_end, ssl_passphrase), `*_library` and `*_preload_libraries`, `archive_*`, `restore_*`, `recovery_*`, and the file and directory settings
 // (`data_directory`, `hba_file`, `ssl_*_file`, `unix_socket_directories`), which run a program or read a file in the instance pod. `kind` says how a value reads:
-// `int` a plain integer, `mem` an integer with kB, MB, GB or TB (kB when none, as Postgres reads it), `ms` an integer with ms, s, min, h or d (ms when none),
+// `int` a plain integer, `mem` an integer with kB, MB, GB or TB, or a bare integer in the setting's own unit (Postgres reads shared_buffers, effective_cache_size and wal_buffers in 8 kB blocks, and max_wal_size, min_wal_size and max_slot_wal_keep_size in MB: `base` is that unit in kB), `ms` an integer with ms, s, min, h or d (ms when none),
 // `real` a number, `enum` one of `values`. `min` and `max` are in kB for `mem` and in ms for `ms`: the most a tenant's single database gets.
 #TenantParameters: {
 	max_connections:                      {kind: "int", min: 1, max: 1000}
-	shared_buffers:                       {kind: "mem", min: 128, max: 4194304}
-	work_mem:                             {kind: "mem", min: 64, max: 1048576}
-	maintenance_work_mem:                 {kind: "mem", min: 1024, max: 2097152}
-	effective_cache_size:                 {kind: "mem", min: 8, max: 16777216}
-	wal_buffers:                          {kind: "mem", min: 32, max: 65536}
-	max_wal_size:                         {kind: "mem", min: 32768, max: 8388608}
-	min_wal_size:                         {kind: "mem", min: 32768, max: 2097152}
-	max_slot_wal_keep_size:               {kind: "mem", min: 64, max: 1073741824}
-	temp_file_limit:                      {kind: "mem", min: 0, max: 16777216}
+	shared_buffers:                       {kind: "mem", base: 8, min: 128, max: 4194304}
+	work_mem:                             {kind: "mem", base: 1, min: 64, max: 1048576}
+	maintenance_work_mem:                 {kind: "mem", base: 1, min: 1024, max: 2097152}
+	effective_cache_size:                 {kind: "mem", base: 8, min: 8, max: 16777216}
+	wal_buffers:                          {kind: "mem", base: 8, min: 32, max: 65536}
+	max_wal_size:                         {kind: "mem", base: 1024, min: 32768, max: 8388608}
+	min_wal_size:                         {kind: "mem", base: 1024, min: 32768, max: 2097152}
+	max_slot_wal_keep_size:               {kind: "mem", base: 1024, min: 64, max: 1073741824}
+	temp_file_limit:                      {kind: "mem", base: 1, min: 0, max: 16777216}
 	checkpoint_completion_target:         {kind: "real", min: 0, max: 1}
 	random_page_cost:                     {kind: "real", min: 0, max: 100}
 	seq_page_cost:                        {kind: "real", min: 0, max: 100}
@@ -238,7 +238,16 @@ import (
 
 // Roles a tenant's database may never be made a member of, and never given as its own attributes (superuser, createrole): through them SQL reaches the instance pod
 // (COPY ... TO PROGRAM, server-side file reads and writes) or the cluster's own roles. A managed role of a tenant's Cluster and a `database.logins` entry are held to it.
-#TenantRefusedRoles: ["postgres", "pg_execute_server_program", "pg_read_server_files", "pg_write_server_files"]
+#TenantRefusedRoles: ["postgres", "streaming_replica", "pg_execute_server_program", "pg_read_server_files", "pg_write_server_files", "pg_create_subscription"]
+
+// The prefixes of role names that are never a tenant's: Postgres reserves `pg_`, and CloudNativePG's own roles are `cnpg_*`. Refused as a managed role's name and as the database's owner.
+#TenantRefusedRolePrefixes: ["pg_", "cnpg_"]
+
+// The longest a stopping instance may wait, in seconds (stopDelay and smartShutdownTimeout): a tenant's pod stops in half an hour at most.
+#TenantMaxStopSeconds: 1800
+
+// The only keys of a tenant Cluster's `storage`: its size and class, never a pvcTemplate or a resize policy of its own.
+#TenantStorageKeys: ["size", "storageClass"]
 
 // The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
 // is a patch: where `database` is not set, upstream's Cluster is applied as it renders.

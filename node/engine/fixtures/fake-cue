@@ -1,0 +1,18 @@
+#!/bin/sh
+# A `cue` ahead of the real one on a tenant test world's PATH: upstream 1.18 renders the postgres superuser's password to every Job and service and makes it the database's owner
+# (PRONTO-2066), which a tenant's release refuses. This stands in for the render as PRONTO-2066 leaves it: the nodeManifests it exports name the owner and the secret otherwise.
+# Everything else is the real cue's, and a world that wants upstream's render as it is (tenant-world --upstream) has no such file.
+self=$(cd "$(dirname "$0")" && pwd)
+real=
+oldifs=$IFS
+IFS=:
+for d in $PATH; do
+  [ "$d" = "$self" ] && continue
+  if [ -x "$d/cue" ]; then real="$d/cue"; break; fi
+done
+IFS=$oldifs
+out=$("$real" "$@") || exit $?
+case " $* " in
+  *" nodeManifests "*) printf '%s\n' "$out" | sed -e 's/game-db-postgres/game-db-app/g' -e 's/"owner": "postgres"/"owner": "game"/g' ;;
+  *) printf '%s\n' "$out" ;;
+esac

@@ -714,7 +714,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		let db_image = (of-kind $objects Cluster | first | get spec.imageName)
 		let db_instances = (of-kind $objects Cluster | first | get spec.instances? | default 1)
 		try { wait-primary $app $ns $db_image $node.waits.primary } catch {|e|
-			if $previous_image != null {
+			# a tenant's database is put back only on an image the engine approves (what a live Cluster says is not the tenant's to choose)
+			if $previous_image != null and (not $tenant or (tenant approved-cluster-image $previous_image $node)) {
 				print -e $"node: (stamp) the database did not come up on the new image: putting back ($previous_image)"
 				let put = (^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete)
 				if $put.exit_code != 0 { error make {msg: $"($e.msg); putting back the database image ($previous_image) failed: ($put.stderr | str trim)"} }
