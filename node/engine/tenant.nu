@@ -289,6 +289,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 	let prefix = $"127.0.0.1:5000/($ns)/"
 	let refused_metadata = (schema-export '#TenantRefusedMetadata')
 	let reserved = (schema-export '#TenantReserved')
+	# the database operator names a Cluster's service account after the Cluster, and a Cluster is named as its author likes: every Cluster's
+	# name is an account no pod of the release runs as (and the release's own is `<release>-db`, nothing else)
+	let clusters = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|o| $o.metadata?.name? | default "" })
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
 		mut why = []
@@ -326,6 +329,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			if ($o.spec?.externalIPs? | default [] | is-not-empty) { $why = ($why | append $"($id) names externalIPs") }
 		}
 		if ($o.kind? | default "") == "Cluster" {
+			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)-db" { $why = ($why | append $"($id) is not named ($node.name)-db: a tenant's database is the release's own") }
 			let image = ($o.spec?.imageName? | default "")
 			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") } else if not ($image =~ '@sha256:[0-9a-f]{64}$') { $why = ($why | append $"($id) runs ($image), which is pinned by tag alone: a tenant's image carries its sha256 digest") }
 			# a Service the operator makes for the database must stay inside the cluster: a LoadBalancer or NodePort one would publish it
@@ -338,10 +342,11 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
 				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
 				# the database operator names the cluster's account `<cluster>-db` and binds it to what the database needs, which a tenant's workload never is
-				if ($account | str ends-with "-db") { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
+				if ($account | str ends-with "-db") or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
 			}
-			# …nor a pod the operator would take for one of the cluster's (it selects its pods, and its policies admit them, by this label)
-			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| $k == "cnpg.io/cluster" }) { $why = ($why | append $"($id) carries the label cnpg.io/cluster, which marks a database's own pods") }
+			# …nor a pod the operator would take for one of the cluster's (it selects its pods, and its policies admit them, by the labels it keeps
+			# under its own prefix)
+			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| $k | str starts-with "cnpg.io/" }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
 			# no runtime class (a sandbox or a host runtime of the node's) and no priority class (a tenant must not pre-empt the node's own pods)
 			if ($spec.runtimeClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets runtimeClassName ($spec.runtimeClassName)") }
 			if ($spec.priorityClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets priorityClassName ($spec.priorityClassName)") }
