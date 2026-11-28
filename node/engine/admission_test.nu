@@ -271,16 +271,29 @@ def test_an_externalsecret_writes_its_own_secret_as_its_owner_and_no_guarded_one
 	let plain = (one-rule secrets "no Secret that holds a database's superuser password")
 	for x in (schema '#TenantGuardedSecretSuffixes') { assert ($plain | str contains $"object.metadata.name.endsWith\('($x)'\)") $plain }
 	# …which the external-secrets controller's own write of `<release>-db-postgres` is not: its account is left out of the policy, as the database operator's is of the Clusters'
-	let conds = ((policies).secrets.spec.matchConditions | get expression)
-	assert ($conds | any {|e| $e == "request.userInfo.username != 'system:serviceaccount:external-secrets:external-secrets'" }) $"the secrets policy judges the external-secrets controller: ($conds)"
-	let other = ((policies ", externalSecretsAccount: \"system:serviceaccount:x:y\"").secrets.spec.matchConditions | get expression)
-	assert ($other | any {|e| $e == "request.userInfo.username != 'system:serviceaccount:x:y'" }) $"the account is no parameter: ($other)"
+	# …in the guarded-name rule ALONE: no matchCondition leaves the controller out of the others (the token checks below judge its requests, which write a token Secret from a template)
+	let eso = "request.userInfo.username == 'system:serviceaccount:external-secrets:external-secrets' || "
+	assert ($plain | str starts-with $eso) $"the guarded-name rule judges the external-secrets controller: ($plain)"
+	let sec = (policies).secrets.spec
+	assert equal ($sec.matchConditions | get name) [not-a-controller not-the-operator]
+	for r in $sec.validations {
+		if not ($r.message | str contains "superuser password") { assert (not ($r.expression | str contains "external-secrets")) $"a rule that is not the guarded-name one leaves the controller out: ($r.message)" }
+	}
+	assert ($sec.validations | any {|v| ($v.expression | str contains "kubernetes.io/service-account-token") }) "the token type rule is gone"
+	assert ($sec.validations | any {|v| ($v.expression | str contains "kubernetes.io/service-account.") }) "the token annotation rule is gone"
+	let other = (policies ', externalSecretsAccount: "system:serviceaccount:x:y"').secrets.spec.validations.0.expression
+	assert ($other | str starts-with "request.userInfo.username == 'system:serviceaccount:x:y' || ") $"the account is no parameter: ($other)"
+	# the ExternalSecret that makes the controller write one is refused as well: two layers (tenant.nu is the third)
+	let tok = (one-rule externalsecrets "targets no service account token Secret")
+	assert ($tok | str contains $"!= '($tes.tokenType)'") $tok
+	assert ($tok | str contains $"startsWith\('($tes.tokenAnnotationPrefix)'\)") $tok
 	# a tenant's Password generator is upstream's: only its keys, no symbolCharacters, a length of at least passwordMinLength and no symbols
 	let keys = (one-rule passwords "sets only the spec keys")
 	for k in $tes.passwordKeys { assert ($keys | str contains $"'($k)'") $keys }
 	assert (not ($keys | str contains "symbolCharacters")) $keys
 	let len = (one-rule passwords "at least")
 	assert ($len | str contains $"object.spec.length >= ($tes.passwordMinLength)") $len
+	assert ($len | str contains $"object.spec.length <= ($tes.passwordMaxLength)") $len
 	let sym = (one-rule passwords "no symbols")
 	assert ($sym | str contains "object.spec.symbols == 0") $sym
 	assert equal ((policies).passwords.spec.matchConstraints.resourceRules) [{apiGroups: [generators.external-secrets.io], apiVersions: ["*"], operations: [CREATE UPDATE], resources: [passwords]}]
@@ -384,8 +397,7 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 	let all = (policies ', operators: ["system:serviceaccount:cnpg-system:cnpg-manager"]')
 	for p in [pods templates objects services secrets] {
 		let conditions = ($all | get $p).spec.matchConditions
-		# the Secrets' also leaves out the external-secrets controller (PRONTO-2147)
-		assert equal ($conditions | get name) (if $p == secrets { [not-a-controller not-the-operator not-external-secrets] } else { [not-a-controller not-the-operator] })
+		assert equal ($conditions | get name) [not-a-controller not-the-operator]
 		assert ($conditions.0.expression | str contains "system:serviceaccount:kube-system:replicaset-controller") $p
 		assert (not ($conditions.0.expression | str contains "kube-system:*")) "no wildcard of kube-system"
 		assert ($conditions.1.expression | str contains "system:serviceaccount:cnpg-system:cnpg-manager") $p

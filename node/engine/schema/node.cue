@@ -283,6 +283,11 @@ import (
 	// adopting a Secret that exists with no owner, so the guarded-name list, not the policy, is what keeps a tenant off the database's Secrets.
 	passwordKeys: ["length", "digits", "symbols", "noUpper", "allowRepeat"]
 	passwordMinLength: 24
+	passwordMaxLength: 128
+	// the template of an ExternalSecret's Secret is a token controller's to fill when it says so: no service account token type, no `kubernetes.io/service-account.` annotation
+	// (tenant.nu's check-objects and the `-engine-externalsecrets` policy both refuse them)
+	tokenType:             "kubernetes.io/service-account-token"
+	tokenAnnotationPrefix: "kubernetes.io/service-account."
 }
 
 // The annotation prefixes no tenant Cluster carries: `cnpg.io/podPatch`, `cnpg.io/validation` and `cnpg.io/reconcilePodSpec` make the operator rewrite the instance pod (its image,
@@ -561,6 +566,10 @@ import (
 				}, {
 					expression: "!object.metadata.name.endsWith('\(#TenantExternalSecret.dbSecretSuffix)') || !has(object.spec.target) || !has(object.spec.target.template) || (!has(object.spec.target.template.templateFrom) && (!has(object.spec.target.template.data) || dyn(object.spec.target.template.data).all(k, k in [\(strings.Join([for k in #TenantExternalSecret.dbSecretKeys {"'\(k)'"}], ", "))] && (k != 'password' || object.spec.target.template.data[k].matches('\(#TenantExternalSecret.dbSecretPassword)')))))"
 					message:    "a tenant's ExternalSecret writes a database Secret (\(#TenantExternalSecret.dbSecretSuffix)) of username and a generated password alone, no templateFrom (#TenantExternalSecret)"
+				}, {
+					// the Secret the controller writes is no token controller's (tenant.nu holds the same; the Secrets policy leaves the controller's own requests out of its guarded-name rule only)
+					expression: "!has(object.spec.target) || !has(object.spec.target.template) || ((!has(object.spec.target.template.type) || object.spec.target.template.type != '\(#TenantExternalSecret.tokenType)') && (!has(object.spec.target.template.metadata) || !has(object.spec.target.template.metadata.annotations) || size(dyn(object.spec.target.template.metadata.annotations).filter(k, k.startsWith('\(#TenantExternalSecret.tokenAnnotationPrefix)'))) == 0))"
+					message:    "a tenant's ExternalSecret targets no service account token Secret and names no service account in a kubernetes.io/service-account.* annotation of its template: the token controller would fill it"
 				}]
 			}
 		},
@@ -576,8 +585,8 @@ import (
 					expression: "!has(object.spec) || dyn(object.spec).all(k, k in [\(strings.Join([for k in #TenantExternalSecret.passwordKeys {"'\(k)'"}], ", "))])"
 					message:    "a tenant's Password generator sets only the spec keys of #TenantExternalSecret.passwordKeys: no symbolCharacters"
 				}, {
-					expression: "!has(object.spec) || !has(object.spec.length) || object.spec.length >= \(#TenantExternalSecret.passwordMinLength)"
-					message:    "a tenant's Password generator is at least \(#TenantExternalSecret.passwordMinLength) long (#TenantExternalSecret.passwordMinLength)"
+					expression: "!has(object.spec) || !has(object.spec.length) || (object.spec.length >= \(#TenantExternalSecret.passwordMinLength) && object.spec.length <= \(#TenantExternalSecret.passwordMaxLength))"
+					message:    "a tenant's Password generator is at least \(#TenantExternalSecret.passwordMinLength) and at most \(#TenantExternalSecret.passwordMaxLength) long (#TenantExternalSecret.passwordMinLength)"
 				}, {
 					expression: "!has(object.spec) || !has(object.spec.symbols) || object.spec.symbols == 0"
 					message:    "a tenant's Password generator has no symbols (#TenantExternalSecret)"
@@ -589,9 +598,10 @@ import (
 			spec: {
 				failurePolicy: _fp
 				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: [""], apiVersions: ["*"], operations: _ops, resources: ["secrets"]}]}
-				matchConditions: list.Concat([_notJudged, [{name: "not-external-secrets", expression: "request.userInfo.username != '\(externalSecretsAccount)'"}]])
+				matchConditions: _notJudged
 				validations: [
-					{expression: "!(\(strings.Join([for x in #TenantGuardedSecretSuffixes {"object.metadata.name.endsWith('\(x)')"}], " || ")))", message: "a tenant's Secret is named no Secret that holds a database's superuser password (#TenantGuardedSecretSuffixes)"},
+					// the external-secrets controller alone may write a guarded name (`<release>-db-postgres`): only this rule leaves it out, every other rule below judges its requests
+					{expression: "request.userInfo.username == '\(externalSecretsAccount)' || !(\(strings.Join([for x in #TenantGuardedSecretSuffixes {"object.metadata.name.endsWith('\(x)')"}], " || ")))", message: "a tenant's Secret is named no Secret that holds a database's superuser password (#TenantGuardedSecretSuffixes)"},
 					{expression: "!has(object.type) || object.type != 'kubernetes.io/service-account-token'", message: "a tenant writes no service account token"},
 					{expression: "!has(object.metadata.annotations) || size(object.metadata.annotations.filter(k, k.startsWith('kubernetes.io/service-account.'))) == 0", message: "a tenant's Secret names no service account in a kubernetes.io/service-account.* annotation: the token controller would fill it"},
 				]
@@ -1222,8 +1232,15 @@ import (
 		[if publisher for o in _all if o.kind == "Password" if o.spec != _|_ for k, _ in o.spec if !list.Contains(#TenantExternalSecret.passwordKeys, k) {
 			"Password/\(o.metadata.name) sets spec.\(k), which a tenant's generator may not (#TenantExternalSecret.passwordKeys)"
 		}],
-		[if publisher for o in _all if o.kind == "Password" if o.spec != _|_ if o.spec.length != _|_ if o.spec.length < #TenantExternalSecret.passwordMinLength {
-			"Password/\(o.metadata.name) sets spec.length below \(#TenantExternalSecret.passwordMinLength) (#TenantExternalSecret.passwordMinLength)"
+		[if publisher for o in _all if o.kind == "Password" if o.spec != _|_ if o.spec.length != _|_ if o.spec.length < #TenantExternalSecret.passwordMinLength || o.spec.length > #TenantExternalSecret.passwordMaxLength {
+			"Password/\(o.metadata.name) sets spec.length outside \(#TenantExternalSecret.passwordMinLength) to \(#TenantExternalSecret.passwordMaxLength) (#TenantExternalSecret.passwordMinLength)"
+		}],
+		// an ExternalSecret's template is no token controller's (the Secret type and annotations a tenant's ExternalSecret may not set)
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.target != _|_ if o.spec.target.template != _|_ if o.spec.target.template.type != _|_ if o.spec.target.template.type == #TenantExternalSecret.tokenType {
+			"ExternalSecret/\(o.metadata.name) targets a service account token Secret"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.target != _|_ if o.spec.target.template != _|_ if o.spec.target.template.metadata != _|_ if o.spec.target.template.metadata.annotations != _|_ for k, _ in o.spec.target.template.metadata.annotations if strings.HasPrefix(k, #TenantExternalSecret.tokenAnnotationPrefix) {
+			"ExternalSecret/\(o.metadata.name) names a service account in a kubernetes.io/service-account.* annotation: the token controller would fill it"
 		}],
 		[if publisher for o in _all if o.kind == "Password" if o.spec != _|_ if o.spec.symbols != _|_ if o.spec.symbols != 0 {
 			"Password/\(o.metadata.name) sets spec.symbols, which a tenant's generator has none of (#TenantExternalSecret)"

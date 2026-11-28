@@ -747,7 +747,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 				if $k not-in $tes.passwordKeys { $why = ($why | append $"($id) sets spec.($k), which a tenant's generator may not \(#TenantExternalSecret.passwordKeys\)") }
 			}
 			let plen = ($pspec | get -o length)
-			if $plen != null and $plen < $tes.passwordMinLength { $why = ($why | append $"($id) sets spec.length below ($tes.passwordMinLength) \(#TenantExternalSecret.passwordMinLength\)") }
+			if $plen != null and ($plen < $tes.passwordMinLength or $plen > $tes.passwordMaxLength) { $why = ($why | append $"($id) sets spec.length outside ($tes.passwordMinLength) to ($tes.passwordMaxLength) \(#TenantExternalSecret.passwordMinLength\)") }
 			let psym = ($pspec | get -o symbols)
 			if $psym != null and $psym != 0 { $why = ($why | append $"($id) sets spec.symbols, which a tenant's generator has none of \(#TenantExternalSecret\)") }
 		}

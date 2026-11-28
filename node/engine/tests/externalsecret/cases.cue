@@ -38,7 +38,9 @@ package externalsecret
 			"Password/gen sets spec.symbols, which a tenant's generator has none of (#TenantExternalSecret)",
 		]
 		refused: "is short": object: spec: {length: 8}
-		refused: "is short": says: ["Password/gen sets spec.length below 24 (#TenantExternalSecret.passwordMinLength)"]
+		refused: "is short": says: ["Password/gen sets spec.length outside 24 to 128 (#TenantExternalSecret.passwordMinLength)"]
+		refused: "is huge": object: spec: {length: 100000000}
+		refused: "is huge": says: ["Password/gen sets spec.length outside 24 to 128 (#TenantExternalSecret.passwordMinLength)"]
 	}
 	allowed: [string]:   #Case
 	refused: [string]:   #Case
@@ -89,6 +91,13 @@ package externalsecret
 		says: [
 			"ExternalSecret/steal sets spec.target.name app-db-postgres, which is not its own name: a tenant's ExternalSecret writes the Secret of its own name (#TenantExternalSecret)",
 			"ExternalSecret/steal sets spec.target.creationPolicy Merge: a tenant's ExternalSecret creates its Secret as its Owner alone (#TenantExternalSecret)",
+		]
+	}
+	refused: "writes a service account token Secret the token controller fills": {
+		object: spec: target: template: {type: "kubernetes.io/service-account-token", metadata: annotations: "kubernetes.io/service-account.name": "studio-builder"}
+		says: [
+			"ExternalSecret/steal targets a service account token Secret",
+			"ExternalSecret/steal names a service account in a kubernetes.io/service-account.* annotation: the token controller would fill it",
 		]
 	}
 	refused: "orphans or keeps no ownership of its Secret": {
