@@ -347,8 +347,26 @@ so a bound every node needs is written here once, with defaults, and each reposi
   (rolling would make more bare pods), so `host.nu apply --check` reports the job as failed its last run. `--dry-run` only says (it makes no state folder). It reads
   `/etc/pronto/dapr-heal.env` (`KUBECTL` (`/usr/local/bin/k3s kubectl` or `/usr/local/bin/kubectl`: `daprHeal.kubectl` is one of `k3s kubectl` or `kubectl`, mapped by host.nu to those fixed commands, never a program the host JSON names), `NAMESPACES`, `GRACE_SECONDS`, `COOLDOWN_MINUTES`), from `#Host.daprHeal`, which is opt-in (`daprHeal?`: a host that is not a k3s node gets no timer); a host that drops it has the timer disabled and stopped and the four files removed by `apply`, and `--check` reports them as drift. Its cases are
   `tests/unit/daprheal.cue` (the real script on a stand-in kubectl).
-- `host.nu`: `render <host.json>` gives the files (each job's script, env file from the values, service and timer: the cleanup's, and the
-  Dapr repair's when the host says `daprHeal`); `apply <host.json>
+- `disk-watch.sh` (PRONTO-2061): the host's own disk alarm, on its own timer (`pronto-disk-watch.timer`, every minute). The 2026-11-27
+  outage evicted every pod, alerting too, so nothing said the disk was filling and the node sat down from 01:11 to 06:00 BRT. The job runs
+  on the host, with no pod, Prometheus or tunnel to lose: it reads `df -P` of each of `diskWatch.mounts` (default `/`, `/var/lib/containerd`,
+  `/var/lib/rancher`; two paths on one filesystem are one disk) and posts to `notifyUrl` (ntfy style: `curl -d`) when a filesystem reaches
+  `thresholdPercent` (75), once per crossing and again every `renotifyMinutes` (360) while it stays over. A mark per mount, written only once
+  the post succeeded, says it was told; it is dropped when the use falls 3 points under the line, so a disk hovering at it is one crossing.
+  A failed post, or a mount df cannot read, fails the run (so `apply --check` reports the job as failed) and is tried again next minute: the
+  watcher never goes quiet on an error. `notifyUrl` has no default (a node names its channel) and must be off the node: a channel behind the node's
+  own tunnel is down with it. It is a secret (a random topic; anyone holding it can post), so `/etc/pronto/disk-watch.env` is mode 600 and the URL
+  carries no app names. The unit runs as a dynamic user, not root (settings from `EnvironmentFile=`, read by systemd as root; marks in
+  `StateDirectory=pronto/disk-watch`; no capabilities, `ProtectSystem=strict`, a 120 s timeout), and curl takes the URL from its config on stdin, so
+  it is in no process's arguments. `diskWatch.thresholdPercent` must be under the line the kubelet evicts at when `kubelet` is set. `diskWatch?` is opt-in; a host that drops it has the timer disabled and the four files removed by `apply`. `--dry-run`
+  says what it would post.
+- `#Host.critical` (PRONTO-2061): `workloads` (at most 8; `namespace`, `kind` Deployment, StatefulSet or DaemonSet, `name`; not a Studio tenant's
+  namespace) that must run under `system-cluster-critical` or `system-node-critical`, so the kubelet evicts everything else first. `host.nu apply`
+  (also `--check`) reads each with `kubectl get ... -o jsonpath` and reports one that is gone or has another class as drift ending `not set by apply`:
+  the class is set by the workload's own manifest, in the repository that deploys it, so `apply` exits 1 and says so. A cluster that cannot answer
+  is an error, never a clean check. Keep the list short: a node whose every pod is critical has none to evict first.
+- `host.nu`: `render <host.json>` gives the files (each job's script, env file from the values, service and timer: the cleanup's, the
+  Dapr repair's when the host says `daprHeal`, and the disk alarm's when it says `diskWatch`); `apply <host.json>
   [--node user@host] [--check]` writes what drifted (each file whole beside itself, then renamed), reloads systemd and enables the timer, or with
   `--check` only says and exits 1. Each read, write and systemctl call is an ssh login of its own (BatchMode, a connect timeout), none retried.
 - `kubelet.nu`: `apply <host.json> [--check] [--node user@host]` sets the kubelet's args from `#Host.kubelet`: max pods, the full

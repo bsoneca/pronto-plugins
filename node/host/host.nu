@@ -27,6 +27,15 @@ const heal_timer = "/etc/systemd/system/pronto-dapr-heal.timer"
 const heal_unit = "pronto-dapr-heal.timer"
 const heal_service_unit = "pronto-dapr-heal.service"
 
+const critical_note = "not set by apply"
+
+const watch_script = "/usr/local/lib/pronto/disk-watch.sh"
+const watch_env = "/etc/pronto/disk-watch.env"
+const watch_service = "/etc/systemd/system/pronto-disk-watch.service"
+const watch_timer = "/etc/systemd/system/pronto-disk-watch.timer"
+const watch_unit = "pronto-disk-watch.timer"
+const watch_service_unit = "pronto-disk-watch.service"
+
 # The command each supported launcher runs as: fixed, absolute, root's (a value of the host JSON is never a path).
 def heal-kubectl [launcher: string]: nothing -> string {
 	match $launcher {
@@ -38,7 +47,7 @@ def heal-kubectl [launcher: string]: nothing -> string {
 
 # The timers a host holds: the cleanup's always, the Dapr sidecar's when #Host says daprHeal.
 def timers [host: record]: nothing -> list<string> {
-	[$gc_unit] ++ (if ($host.daprHeal? != null) { [$heal_unit] } else { [] })
+	[$gc_unit] ++ (if ($host.daprHeal? != null) { [$heal_unit] } else { [] }) ++ (if ($host.diskWatch? != null) { [$watch_unit] } else { [] })
 }
 
 # One text file's body, ending in one newline.
@@ -65,6 +74,18 @@ export def vet [host: record] {
 		})
 		rm -f $h
 		if $v.exit_code != 0 { error make {msg: $"node-host: the host's daprHeal is not what #Host allows: ($v.stderr | str trim)"} }
+	}
+	for sec in [[key def]; ["diskWatch" "#DiskWatch"] ["critical" "#Critical"]] {
+		let v = ($host | get --optional $sec.key)
+		if $v == null { continue }
+		let f = (mktemp --tmpdir node-host-vet-XXXXXX.json)
+		$v | to json | save --force --raw $f
+		let r = (try { do { ^cue vet -c ($here | path join schema host.cue) $f -d $sec.def } | complete } catch {
+			rm -f $f
+			error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
+		})
+		rm -f $f
+		if $r.exit_code != 0 { error make {msg: $"node-host: the host's ($sec.key) is not what #Host allows: ($r.stderr | str trim)"} }
 	}
 	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is status 2 there, which the cleanup loop would
 	# read as "no tag matches" and keep every image. It is checked here by the operator's bash, not the node's (the node's
@@ -98,7 +119,33 @@ export def render [host: record]: nothing -> list<record> {
 			"[Timer]" $"OnCalendar=($gc.onCalendar)" "Persistent=true" "" "[Install]" "WantedBy=timers.target"
 		] | str join "\n"))}
 	]
-	if ($host.daprHeal? == null) { return $gc_files }
+	let watch_files = if ($host.diskWatch? == null) { [] } else {
+		let w = $host.diskWatch
+		let watch_head = "# pronto-plugins node/host (disk watch): a filesystem filling is posted to the operator's channel."
+		[
+			# 600: the URL is the channel's key.
+			{path: $watch_env, mode: "600", text: (lines ([
+				"# pronto-plugins node/host (disk watch): what disk-watch.sh reads, from the node's #Host diskWatch."
+				$"MOUNTS='($w.mounts | str join ' ')'"
+				$"THRESHOLD_PERCENT=($w.thresholdPercent)"
+				$"RENOTIFY_MINUTES=($w.renotifyMinutes)"
+				$"NOTIFY_URL='($w.notifyUrl)'"
+			] | str join "\n"))}
+			{path: $watch_script, mode: "755", text: (lines (open --raw ($here | path join disk-watch.sh)))}
+			{path: $watch_service, mode: "644", text: (lines ([
+				$watch_head "[Unit]" "Description=Post to the operator when a filesystem of the node is filling" "After=local-fs.target network-online.target" "Wants=network-online.target" ""
+				# Not root: it reads df and posts. The settings come from the manager (EnvironmentFile is read as root), the marks live in StateDirectory.
+				"[Service]" "Type=oneshot" $"EnvironmentFile=($watch_env)" $"ExecStart=/bin/bash ($watch_script)" "Nice=19" "TimeoutStartSec=120"
+				"DynamicUser=yes" "StateDirectory=pronto/disk-watch" "NoNewPrivileges=yes" "ProtectSystem=strict" "ProtectHome=yes" "PrivateTmp=yes" "PrivateDevices=yes"
+				"CapabilityBoundingSet=" "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" "ProtectKernelTunables=yes" "ProtectControlGroups=yes"
+			] | str join "\n"))}
+			{path: $watch_timer, mode: "644", text: (lines ([
+				$watch_head "[Unit]" "Description=Run pronto-disk-watch.service" ""
+				"[Timer]" $"OnCalendar=($w.onCalendar)" "" "[Install]" "WantedBy=timers.target"
+			] | str join "\n"))}
+		]
+	}
+	if ($host.daprHeal? == null) { return ($gc_files ++ $watch_files) }
 	let heal = $host.daprHeal
 	let heal_head = "# pronto-plugins node/host (Dapr sidecar): a pod that asks for one and runs none is rolled."
 	$gc_files ++ [
@@ -118,7 +165,7 @@ export def render [host: record]: nothing -> list<record> {
 			$heal_head "[Unit]" "Description=Run pronto-dapr-heal.service" ""
 			"[Timer]" $"OnCalendar=($heal.onCalendar)" "Persistent=true" "" "[Install]" "WantedBy=timers.target"
 		] | str join "\n"))}
-	]
+	] ++ $watch_files
 }
 
 # Runs a shell script on the node (ssh, as root through sudo unless --plain) or here. $stdin, when given, is its
@@ -162,50 +209,56 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			# Whole beside the file, then renamed over it: a full disk leaves the old file.
 			let dir = ($path | path dirname)
 			let tmp = $"($path).new"
-			must (sh $node $"mkdir -p '($dir)' && rm -f '($tmp)' && cat > '($tmp)' && chmod ($f.mode) '($tmp)' && mv -f '($tmp)' '($path)' || { rm -f '($tmp)'; exit 1; }" $f.text) $"writing ($path)" | ignore
+			must (sh $node $"mkdir -p '($dir)' && rm -f '($tmp)' && \(umask 077 && cat > '($tmp)'\) && chmod ($f.mode) '($tmp)' && mv -f '($tmp)' '($path)' || { rm -f '($tmp)'; exit 1; }" $f.text) $"writing ($path)" | ignore
 			print $"wrote ($path)"
 			$changed = true
 		}
 	}
 	# A host that no longer says daprHeal (or never did) holds none of its files: a repair timer left from when it did would go on rolling
 	# workloads of namespaces nobody lists any more. It is drift; apply stops and disables it, removes the four files and (below) reloads systemd.
-	if ($host.daprHeal? == null) {
-		let left = ([$heal_timer $heal_service $heal_script $heal_env] | where {|f|
+	# The same for diskWatch (its timer would go on posting to a channel nobody lists any more).
+	for sec in [
+		{key: "daprHeal", timer: $heal_timer, service: $heal_service, script: $heal_script, env: $heal_env, unit: $heal_unit, service_unit: $heal_service_unit}
+		{key: "diskWatch", timer: $watch_timer, service: $watch_service, script: $watch_script, env: $watch_env, unit: $watch_unit, service_unit: $watch_service_unit}
+	] {
+	if ($host | get --optional $sec.key) == null {
+		let left = ([$sec.timer $sec.service $sec.script $sec.env] | where {|f|
 			let path = $root + $f
 			(must (sh $node $"if [ -e '($path)' ]; then echo yes; fi") $"looking for ($path)" | str trim) == "yes"
 		})
 		if ($left | is-not-empty) {
 			for f in $left {
-				$drift = ($drift | append $"($root + $f) is installed but the host has no daprHeal")
-				print $"drift: ($root + $f) is installed but the host has no daprHeal"
+				$drift = ($drift | append $"($root + $f) is installed but the host has no ($sec.key)")
+				print $"drift: ($root + $f) is installed but the host has no ($sec.key)"
 			}
 			if not $check {
 				# The timer is disabled and stopped and its service (a sweep that may be running) stopped; the files are removed only once systemd says
 				# so: both inactive, the timer disabled or absent. A failed stop, or a state that cannot be read, is an error with the files kept, so the
 				# next apply finds the drift again.
-				let off = (sh $node $"systemctl disable --now ($heal_unit)")
-				if $off.exit_code == 255 { error make {msg: $"node-host: disabling ($heal_unit): ($off.stderr | str trim)"} }
-				let stop = (sh $node $"systemctl stop ($heal_service_unit)")
-				if $stop.exit_code == 255 { error make {msg: $"node-host: stopping ($heal_service_unit): ($stop.stderr | str trim)"} }
-				for unit in [$heal_unit $heal_service_unit] {
+				let off = (sh $node $"systemctl disable --now ($sec.unit)")
+				if $off.exit_code == 255 { error make {msg: $"node-host: disabling ($sec.unit): ($off.stderr | str trim)"} }
+				let stop = (sh $node $"systemctl stop ($sec.service_unit)")
+				if $stop.exit_code == 255 { error make {msg: $"node-host: stopping ($sec.service_unit): ($stop.stderr | str trim)"} }
+				for unit in [$sec.unit $sec.service_unit] {
 					let active = (sh $node $"systemctl is-active ($unit)")
 					if $active.exit_code == 255 { error make {msg: $"node-host: asking whether ($unit) is active: ($active.stderr | str trim)"} }
 					let a = ($active.stdout | str trim)
 					if $a in ["active" "activating" "reloading" "deactivating"] { error make {msg: $"node-host: ($unit) is still ($a) after being stopped: its files are kept"} }
 					if $a not-in ["inactive" "failed" "unknown"] { error make {msg: $"node-host: the state of ($unit) is unreadable \(($a), ($active.stderr | str trim)\): its files are kept"} }
 				}
-				let enabled = (sh $node $"systemctl is-enabled ($heal_unit)")
-				if $enabled.exit_code == 255 { error make {msg: $"node-host: asking whether ($heal_unit) is enabled: ($enabled.stderr | str trim)"} }
+				let enabled = (sh $node $"systemctl is-enabled ($sec.unit)")
+				if $enabled.exit_code == 255 { error make {msg: $"node-host: asking whether ($sec.unit) is enabled: ($enabled.stderr | str trim)"} }
 				let e = ($enabled.stdout | str trim)
 				# Absent is a fact about the file, not systemd's wording (newer versions say not-found): with the timer's file already gone, no state
 				# or `not-found` is what a unit that is not loaded gives.
-				let timer_there = ((must (sh $node $"if [ -e '($root + $heal_timer)' ]; then echo yes; fi") $"looking for ($root + $heal_timer)" | str trim) == "yes")
+				let timer_there = ((must (sh $node $"if [ -e '($root + $sec.timer)' ]; then echo yes; fi") $"looking for ($root + $sec.timer)" | str trim) == "yes")
 				let absent = (not $timer_there and $e in ["" "not-found"])
-				if not ($absent or $e in ["disabled" "masked" "masked-runtime"]) { error make {msg: $"node-host: ($heal_unit) is not disabled \(($e), ($enabled.stderr | str trim)\): its files are kept"} }
+				if not ($absent or $e in ["disabled" "masked" "masked-runtime"]) { error make {msg: $"node-host: ($sec.unit) is not disabled \(($e), ($enabled.stderr | str trim)\): its files are kept"} }
 				for f in $left { must (sh $node $"rm -f '($root + $f)'") $"removing ($root + $f)" | ignore; print $"removed ($root + $f)" }
 				$changed = true
 			}
 		}
+	}
 	}
 	# systemd runs the units it last loaded: files that match on disk are not the units running. A run that stopped between
 	# writing a unit and reloading leaves every file matching, so a pending reload is asked of systemd itself, for the
@@ -269,6 +322,21 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			}
 		}
 	}
+	# The workloads the host says must outlive an eviction run under a system-*-critical class. Only read: the class is set by each
+	# workload's own manifest, so apply cannot repair this and says so. An unreadable cluster is an error, never "no drift".
+	if ($host.critical? != null) {
+		let kubectl = $root + (heal-kubectl $host.critical.kubectl)
+		for w in $host.critical.workloads {
+			let what = $"($w.namespace)/($w.kind | str lowercase)/($w.name)"
+			let got = (must (sh $node $"($kubectl) get ($w.kind | str lowercase) ($w.name) -n ($w.namespace) --ignore-not-found --request-timeout=20s -o jsonpath='{.metadata.name}/{.spec.template.spec.priorityClassName}'") $"reading ($what)" | str trim)
+			let class = if $got == "" { null } else { $got | split row "/" | skip 1 | str join "/" }
+			let bad = if $class == null { "does not exist" } else if ($class =~ '^system-(cluster|node)-critical$') { "" } else { $"runs under priority class '($class)', not system-cluster-critical or system-node-critical" }
+			if $bad != "" {
+				$drift = ($drift | append $"($what) ($bad) \(#Host critical; ($critical_note)\)")
+				print $"drift: ($what) ($bad) \(#Host critical; ($critical_note)\)"
+			}
+		}
+	}
 	$drift
 }
 
@@ -285,6 +353,11 @@ def "main apply" [host: path, --check, --node: string = "", --root: string = ""]
 	let drift = (apply (open $host) --check=$check --node $node --root $root)
 	if ($drift | is-empty) { print "node-host: as #Host says"; return }
 	if $check { exit 1 }
+	# A workload outside a system critical class is set by its own manifest, not by this: apply wrote what it could and says it is not clean.
+	if ($drift | any {|d| $d | str ends-with $"($critical_note))" }) {
+		print --stderr "node-host: a #Host critical workload is not at a system critical priority class: set it in the workload's own manifest"
+		exit 1
+	}
 	# A failed job that still fails (after being run again when files were written) is not set right by writing: exit non-zero,
 	# so the run is not read as clean. "set" is said only when something was written.
 	if (failed-service $drift) {
