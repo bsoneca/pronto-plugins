@@ -994,7 +994,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let staged = if ($stages | is-not-empty) { staged-checks $stages $flip $sync $changed $doc $old $keyed } else { null }
 	if ($changed | is-empty) {
 		let v = (write-flags $at $doc $app --meta ({stage: all} | merge $kept) --from $before)
-		if ($flip | is-not-empty) { record-back $at $app $v "none" $owned }
+		if ($flip | is-not-empty) { record-back $at $app $v "none" $owned | ignore }
 		return
 	}
 	# --no-canary was the way past the testers' stage (pronto-plugins#184); every push is that way now.
@@ -1029,7 +1029,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		let verdict = if ($live | is-empty) { $cases_none } else { "passed" }
 		let v = (staged-live $at $app $doc $staged $live $cmds $before $stages $dwell ({flag: $names, note: $notes} | merge $kept) $cases_none $guard)
 		tell-board $at $app $moved
-		record-back $at $app $v $verdict $owned
+		record-back $at $app $v $verdict $owned | ignore
 		return
 	}
 	if ($live | is-empty) {
@@ -1039,14 +1039,14 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		# Written, then live on every flagd: a flag with no cases to run is still waited for, and a flip that is not live in time fails the push.
 		let v = if $guard == null { let w = (write-flags $at $doc $app --meta $meta --from $before); live-or-restore $at $app $old $doc $before $w $names; $w } else { watch-flip $at $app $doc $names $before $before $meta $guard (cases-wrap $at) $cases }
 		tell-board $at $app $moved
-		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned }
+		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned | ignore }
 		return
 	}
 	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
 	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
 	let v = (flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept) --guard $guard)
 	tell-board $at $app $moved
-	if ($flip | is-not-empty) { record-back $at $app $v "passed" $owned }
+	if ($flip | is-not-empty) { record-back $at $app $v "passed" $owned | ignore }
 }
 
 # The flags whose entry differs between the live flags `old` and the document `doc` a push would write: a push that names
@@ -1332,7 +1332,7 @@ export def rollback [app: path, version?: string, --expect: string] {
 	print $"flags: ($at.url) is ($to)'s flags again, as version ($again)"
 	# The flags a rollback turned off are rolled back for the board: their Done issues are Live again.
 	tell-board $at $app (changes-between $before $target | where {|c| $c.to == false })
-	record-back $at $app $again "rollback" (changes-between $before $target | get flag)
+	record-back $at $app $again "rollback" (changes-between $before $target | get flag) | ignore
 	# Confirmed live last: the rollback stands whether or not a flagd has caught up, and a wait that fails is the exit.
 	print "flags: waiting for every flagd to say so"
 	await-live $at (want-of $before $target)
@@ -1363,7 +1363,7 @@ def record-want [at: record, version: string, owned: any]: nothing -> record {
 }
 
 # The text of a flag's block in flags_spec.cue with the literal of its depth-1 `default:` replaced by `value`, and
-# nothing else touched. The block opens at `flags: <name>: {` in column 0 and ends at its matching `}`. Refused, with
+# nothing else touched. The block opens at `flags: <name>: {` in column 0, or at `<name>: {` inside a column-0 `flags: {` block, and ends at its matching `}`. Refused, with
 # the text unchanged, where the block is not there exactly once, or the default is not there exactly once at depth 1,
 # or is no literal (a reference, an expression): the tool does not guess what such a default means.
 # A name as a regular expression's literal.
@@ -1372,8 +1372,17 @@ def re-escape [name: string]: nothing -> string { $name | str replace -a -r '([.
 export def splice-default [text: string, flag: string, value: any]: nothing -> string {
 	let lines = ($text | split row "\n")
 	let esc = (re-escape $flag)
-	let opens = ($lines | enumerate | where {|l| $l.item =~ $'^flags:\s+"?($esc)"?:\s*\{' } | get index)
-	if ($opens | length) != 1 { error make {msg: $"flags: record: ($flag) has ($opens | length) blocks opening `flags: ($flag): \{` in column 0, not one"} }
+	let tops = ($lines | enumerate | where {|l| $l.item =~ $'^flags:\s+"?($esc)"?:\s*\{' } | get index)
+	# The nested shape: `<name>: {` inside a column-0 `flags: {` block, which ends at the next column-0 `}`.
+	mut nested = []
+	mut inside = false
+	for l in ($lines | enumerate) {
+		if $inside {
+			if $l.item =~ '^\}' { $inside = false } else if $l.item =~ $'^\s+"?($esc)"?:\s*\{' { $nested = ($nested | append $l.index) }
+		} else if $l.item =~ '^flags:\s*\{\s*(//.*)?$' { $inside = true }
+	}
+	let opens = ($tops | append $nested)
+	if ($opens | length) != 1 { error make {msg: $"flags: record: ($flag) has ($opens | length) blocks opening `flags: ($flag): \{` in column 0 or `($flag): \{` inside `flags: \{`, not one"} }
 	let rendered = match ($value | describe) {
 		"bool" => { if $value { "true" } else { "false" } }
 		"string" => { $value | to json }
@@ -1676,11 +1685,11 @@ def record-close [app: path, owned: any, stale: list<string>]: nothing -> string
 # written, and only where live still holds them (else record: skipped). Skipped under a dry run, and where
 # PRONTO_FLAGS_RECORD says off. PRONTO_FLAGS_RECORD_BIN stands in for the pull request, in tests: it is run once
 # per flag to record, as `<bin> <flag> <value as JSON> <version>`. Never fails the caller, whose write stands.
-def record-back [at: record, app: path, version: string, cases: string, owned: any] {
-	if (dry) or ($env.PRONTO_FLAGS_RECORD? | default "") in ["0" "off"] { return }
-	if $owned != null and ($owned | is-empty) { return }
+def record-back [at: record, app: path, version: string, cases: string, owned: any]: nothing -> any {
+	if (dry) or ($env.PRONTO_FLAGS_RECORD? | default "") in ["0" "off"] { return null }
+	if $owned != null and ($owned | is-empty) { return null }
 	let stand = ($env.PRONTO_FLAGS_RECORD_BIN? | default "")
-	if $stand == "" and (has-kubeconfig $at) { print -e "flags: record skipped: it runs the app's generate, which a kubeconfig mirror's credential must not sit beside"; return }
+	if $stand == "" and (has-kubeconfig $at) { print -e "flags: record skipped: it runs the app's generate, which a kubeconfig mirror's credential must not sit beside"; return null }
 	let base = {event: "flags.record", app: ($app | path expand | path basename), target: $at.url, version: $version, cases: $cases}
 	let file = (journal-file $app)
 	let note = {|rec: record|
@@ -1698,8 +1707,10 @@ def record-back [at: record, app: path, version: string, cases: string, owned: a
 		{record: "failed", flags: "", pr: "", note: ($e.msg | lines | first)}
 	}
 	let closed = if $stand == "" and $r.record == "none" { record-close $app $owned ($r.stale? | default []) } else { "" }
-	do $note ($r | merge (if $closed != "" { {closed: $closed} } else { {} }))
+	let r = ($r | merge (if $closed != "" { {closed: $closed} } else { {} }))
+	do $note $r
 	if $r.record == "pr" { print $"flags: recorded in the spec by ($r.pr)" } else if $r.record == "stand-in" { print $"flags: recorded ($r.flags)" }
+	$r
 }
 
 # The live flags into the spec, by hand: what a flip does after its write. Without --version, the version live now and
@@ -1708,7 +1719,11 @@ export def record [app: path, --expect: string, --version: string, --flags: list
 	pin-guard $app
 	let at = (live $app)
 	if (target-guard $at $expect) { print "flags: dry run: nothing written"; return }
-	record-back $at $app ($version | default (generation $at)) "manual" (if ($flags | is-empty) { null } else { $flags })
+	let r = (record-back $at $app ($version | default (generation $at)) "manual" (if ($flags | is-empty) { null } else { $flags }))
+	# A record by hand that wrote nothing is a failure, never a quiet exit 0 after a warning.
+	if $r == null { return }
+	if $r.record in ["pr" "stand-in"] or ($r.closed? | default "") != "" { return }
+	error make {msg: $"flags: record: nothing was recorded \(($r.record)(if ($r.note? | default "") != "" { ': ' + $r.note } else if ($r.stale? | default [] | is-not-empty) { ': stale ' + ($r.stale | str join ', ') } else { '' })\)"}
 }
 
 # What the spec says differently from what is live: for every flag both hold, its reach (default, accounts,
