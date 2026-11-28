@@ -353,6 +353,7 @@ def main [] {
 	test_a_tenants_release_of_upstreams_render_is_refused_for_the_postgres_superuser
 	test_a_tenants_database_image_is_put_back_only_where_the_engine_approves_it
 	test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_its_namespace
+	test_a_legacy_cluster_with_the_superuser_on_is_taken_off_it_before_the_release_writes
 	test_the_recorded_engine_pin_is_a_regular_file_of_forty_hex_digits
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
@@ -2708,6 +2709,51 @@ def test_a_tenants_workload_never_reads_the_superuser_secret_a_live_cluster_name
 	let r = (tenant-release $w)
 	assert ($r.exit_code != 0) "a workload that reads a live Cluster's superuser Secret was not refused"
 	assert (has $r.stderr "reads the secret(s) older-root-secret") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+}
+
+def test_a_legacy_cluster_with_the_superuser_on_is_taken_off_it_before_the_release_writes [] {
+	print "test a live Cluster the release renders again that still has a superuserSecret is patched to enableSuperuserAccess false with no superuserSecret, by the publisher, before anything is applied, and its Secret no longer refuses the release (PRONTO-2260)..."
+	let patch = {|w| calls-by $w publisher.kubeconfig | enumerate | where {|c| $c.item =~ "^patch cluster.postgresql.cnpg.io/game-db " } }
+	let applied = {|w| calls-by $w publisher.kubeconfig | enumerate | where {|c| $c.item =~ "^apply " and not ($c.item | str contains "--dry-run") } }
+	# game-db-app is a Secret the release's workloads read: while the legacy Cluster names it as its superuserSecret, that read is refused
+	let w = (tenant-world)
+	"game-db=game-db-app\n" | save -f ($w.state | path join live_clusters)
+	let r = (tenant-release $w)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let p = (do $patch $w)
+	assert equal ($p | length) 1 "the legacy Cluster was not patched exactly once"
+	assert (($p | first).item | str contains $"-n ($tenant_ns)") "the patch is not in the tenant's namespace"
+	assert (($p | first).item | str contains '"enableSuperuserAccess":false') "the patch does not turn the superuser off"
+	assert (($p | first).item | str contains '"superuserSecret":null') "the patch does not drop the superuserSecret"
+	assert ((do $applied $w | first).index > ($p | first).index) "something was applied before the Cluster was migrated"
+	assert (has $r.stdout "the database cluster game-db is off the postgres superuser") $r.stdout
+	rm -rf $w.dir
+	# a Cluster already off the superuser, or none yet, is not patched
+	for live in ["game-db\n" ""] {
+		let w = (tenant-world)
+		$live | save -f ($w.state | path join live_clusters)
+		let r = (tenant-release $w)
+		assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+		assert equal (do $patch $w | length) 0 "a Cluster with no superuserSecret was patched"
+		rm -rf $w.dir
+	}
+	# a Cluster the release does not render is the tenant's older database: kept as it is, its Secret still guarded
+	let w = (tenant-world)
+	"older-store=game-db-app\n" | save -f ($w.state | path join live_clusters)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a Secret of a Cluster the release does not migrate was not refused"
+	assert (not ((calls-by $w publisher.kubeconfig) | any {|c| $c =~ "^patch cluster" })) "a Cluster outside the release was patched"
+	assert equal (writes $w) []
+	rm -rf $w.dir
+	# a patch the server refuses stops the release before it writes anything
+	let w = (tenant-world)
+	"game-db=game-db-app\n" | save -f ($w.state | path join live_clusters)
+	"" | save -f ($w.state | path join patch_fail)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a refused migration did not stop the release"
+	assert (has $r.stderr "taking the database cluster game-db off the postgres superuser failed") $r.stderr
 	assert equal (writes $w) []
 	rm -rf $w.dir
 }

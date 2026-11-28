@@ -670,7 +670,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded. A container that
 	# leaves allowPrivilegeEscalation unset is made to say false first, and what it will retire is the engine's to decide, before any write.
 	let objects = if $tenant { tenant harden-objects $objects } else { $objects }
-	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant live-clusters $node.namespace) (tenant live-superuser-secrets $node.namespace) }
+	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant live-clusters $node.namespace) (tenant live-superuser-secrets $node.namespace $objects) }
 	let retire = if $tenant { tenant check-retire $node (tenant retire-kinds) $objects } else { $node.retire }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })
@@ -695,6 +695,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# A tenant's render has no Namespace: its provisioner made it.
 	if ($parts.namespace | is-not-empty) { apply-objects $parts.namespace --adopt=$adopt }
 	dry-run $parts.rest $ns --adopt=$adopt --tenant=$tenant
+	# A legacy tenant Cluster that still has the postgres superuser on is taken off it first (PRONTO-2260), so the Secrets this release writes never meet a login
+	if $tenant { for n in (tenant migrate-superuser $ns $objects) { print $"node: (stamp) the database cluster ($n) is off the postgres superuser" } }
 	# What serves is about to change (the server accepted the render): the record of the public site's verification, which cd
 	# trusts, is invalidated before the first write that can change it, so a release that fails halfway can never leave an old
 	# commit marked verified over new images. A first release has no record.

@@ -621,13 +621,39 @@ export def approved-cluster-image [image: any, node: record]: nothing -> bool {
 	(schema-export '#TenantDatabaseImages' | any {|a| $image == $"($prefix)($node.name)-database-base:($a.major)@($a.digest)" })
 }
 
-# The Secrets the Clusters already in the namespace name as their `superuserSecret` (a legacy Cluster with superuser access on keeps the login whatever this release
-# renders): no workload of this release reads them either.
-export def live-superuser-secrets [namespace: string]: nothing -> list<string> {
+# The Clusters already in the namespace, as its publisher reads them (none: an empty list).
+def live-cluster-items [namespace: string]: nothing -> list {
 	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
 	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
 	if ($r.stdout | str trim | is-empty) { return [] }
-	$r.stdout | from json | get -o items | default [] | each {|c| $c.spec?.superuserSecret?.name? | default "" } | where {|n| $n != "" }
+	$r.stdout | from json | get -o items | default []
+}
+
+# The names of the live Clusters this release takes off the postgres superuser (PRONTO-2260): one that still has `enableSuperuserAccess` on or names a `superuserSecret`
+# (a legacy Cluster, made before the engine said false) and that the release renders again, which `harden-objects` makes say false with no `superuserSecret`.
+def superuser-migrations [items: list, objects: list]: nothing -> list<string> {
+	let renewed = ($objects | where {|o| ($o.kind? | default "") == "Cluster" and ($o.spec?.enableSuperuserAccess? | default null) == false and ($o.spec?.superuserSecret? | default null) == null } | each {|o| $o.metadata?.name? | default "" })
+	$items | where {|c| ($c.metadata?.name? | default "") in $renewed and (($c.spec?.enableSuperuserAccess? | default false) != false or ($c.spec?.superuserSecret? | default null) != null) } | each {|c| $c.metadata.name }
+}
+
+# The Secrets the Clusters already in the namespace name as their `superuserSecret` (a legacy Cluster with superuser access on keeps the login whatever this release
+# renders): no workload of this release reads them either. Not those of a Cluster this release migrates off the superuser (`migrate-superuser` does it before any
+# object of the release is applied): that Secret holds no login after it.
+export def live-superuser-secrets [namespace: string, objects: list = []]: nothing -> list<string> {
+	let items = (live-cluster-items $namespace)
+	let moving = (superuser-migrations $items $objects)
+	$items | where {|c| ($c.metadata?.name? | default "") not-in $moving } | each {|c| $c.spec?.superuserSecret?.name? | default "" } | where {|n| $n != "" }
+}
+
+# Takes the live Clusters `superuser-migrations` names off the superuser, as the namespace's publisher, before the release applies anything else: the engine's own
+# patch, never one by hand, so no Secret of the release is written while a login still stands. Returns the names it patched.
+export def migrate-superuser [namespace: string, objects: list]: nothing -> list<string> {
+	let names = (superuser-migrations (live-cluster-items $namespace) $objects)
+	for n in $names {
+		let r = (^kubectl patch $"cluster.postgresql.cnpg.io/($n)" -n $namespace --type merge -p ({spec: {enableSuperuserAccess: false, superuserSecret: null}} | to json --raw) | complete)
+		if $r.exit_code != 0 { error make {msg: $"taking the database cluster ($n) off the postgres superuser failed: ($r.stderr | str trim)"} }
+	}
+	$names
 }
 
 export def live-clusters [namespace: string]: nothing -> list<string> {
