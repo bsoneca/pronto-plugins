@@ -11,6 +11,9 @@ package externalsecret
 	object: {apiVersion: "external-secrets.io/v1beta1", kind: "ExternalSecret", metadata: {"name": name, namespace: ns}, spec: {...}}
 	// the reasons it is refused for, in the order the schema says them: none when it passes
 	says: [...string]
+	// the words of the CRD's own refusal, for a case the served ExternalSecret CRD's schema refuses before any policy runs (an unknown field, a required value): the API-server half of
+	// admission_test.nu expects that and not the policy's
+	crd?: string
 }
 
 #Cases: {
@@ -57,6 +60,7 @@ package externalsecret
 		secretStoreRef: {}
 		target: name: "steal"
 	}
+	refused: "names an empty store reference": crd: "Required value"
 	refused: "names an empty store reference": says: ["ExternalSecret/steal sets spec.secretStoreRef, which names a store: a tenant's ExternalSecret reads none (#TenantExternalSecret)"]
 	refused: "extracts or finds in a store": object: spec: {
 		target: name: "steal"
@@ -104,16 +108,19 @@ package externalsecret
 		target: name: "steal"
 		dataFrom: [{sourceRef: generatorRef: {kind: "Password", name: "g", namespace: "other-tenant"}}]
 	}
+	refused: "sets a generatorRef namespace": crd: "unknown field"
 	refused: "sets a generatorRef namespace": says: ["ExternalSecret/steal spec.dataFrom[0].sourceRef.generatorRef sets namespace, which a tenant's ExternalSecret may not (#TenantExternalSecret)"]
 	refused: "draws from a generator with no kind": object: spec: {
 		target: name: "steal"
 		dataFrom: [{sourceRef: generatorRef: {name: "g"}}]
 	}
+	refused: "draws from a generator with no kind": crd: "Required value"
 	refused: "draws from a generator with no kind": says: ["ExternalSecret/steal spec.dataFrom[0] draws from a generator with no kind (#TenantExternalSecret.generatorKinds)"]
 	refused: "sets a spec key outside the allowed ones": object: spec: {
 		refreshPolicy: "OnChange"
 		target: name:  "steal"
 		dataFrom: [{sourceRef: generatorRef: {kind: "Password", name: "g"}}]
 	}
+	refused: "sets a spec key outside the allowed ones": crd: "unknown field"
 	refused: "sets a spec key outside the allowed ones": says: ["ExternalSecret/steal sets spec.refreshPolicy, which a tenant's ExternalSecret may not (#TenantExternalSecret)"]
 }

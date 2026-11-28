@@ -260,6 +260,8 @@ import (
 #TenantExternalSecret: {
 	generatorAPIVersion: "generators.external-secrets.io/v1alpha1"
 	generatorKinds: ["Password"]
+	// The keys of `spec` follow the served ESO CRD (#Served.externalSecrets): its schema refuses an unknown key before the policy runs, and defaults some (refreshInterval). A bump of
+	// the operator re-checks this list with `admission_test.nu --kind new` (tests/externalsecret/cases.cue names the cases the CRD refuses itself).
 	spec: ["refreshInterval", "target", "data", "dataFrom"]
 	noStore: ["secretStoreRef"]
 	emptyLists: ["data"]

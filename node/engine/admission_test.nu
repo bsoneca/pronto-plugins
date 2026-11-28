@@ -1,10 +1,12 @@
 #!/usr/bin/env nu
 # Run with: nu node/engine/admission_test.nu                      (needs `cue`; the rules, each read off the schema)
-#           nu node/engine/admission_test.nu --kind <context>    (also asks a cluster, see below)
+#           nu node/engine/admission_test.nu --kind new          (also asks a kind cluster it makes and deletes itself, see below; needs kind and docker)
+#           nu node/engine/admission_test.nu --kind <context>    (the same on a kind cluster of the harness's own naming, kind-admission-test-*, that the caller made)
 #
 # schema/node.cue #TenantAdmission: the cluster's admission policies for a tenant's namespaces (PRONTO-1941, step 2 of PRONTO-1929). They are generated from
 # the definitions tenant.nu's check-objects reads, so the first half holds, for each rule, that the policy carries it and that it carries what the schema says
-# (change a list of the schema and the policy moves with it). The second half, with `--kind <kube context>` of a cluster the caller made (kind, the
+# (change a list of the schema and the policy moves with it). The second half, with `--kind new` (a kind cluster named admission-test-<pid>, deleted at the end, whatever
+# happens) or `--kind kind-admission-test-<n>` (one the caller made; refused unless its API server is on localhost and no namespace of it but this test's has the tenant label), the
 # CRDs of CloudNativePG 1.30 installed: `kubectl apply --server-side -f cnpg-1.30.1.yaml`), applies the policies with a Deny binding and asks the API server, as a
 # server-side dry run (the ExternalSecret CRDs of external-secrets 0.10.5 are installed when missing), whether each object is refused (by which policy) or admitted: a bad object per rule, and the good ones the engine renders. The dry run writes
 # nothing; the policies, the namespaces and the service accounts it makes are the caller's cluster's to delete.
@@ -12,10 +14,12 @@
 const engine_dir = path self .
 const label = "studio.bsoneca.com/tenant"
 const policy_prefix = "studio-tenant"
+const eso_crds_sha256 = "a3c0c4fd076e4c6d316a1b04bc2e09c35bd79ef76377dbb4923a39c5f27083cc"
 
 use std/assert
 
 def main [--kind: string = ""] {
+	if $kind != "" and $kind != "new" { guard-cluster $kind }
 	print "Running tenant admission tests...\n"
 	test_no_policy_is_named_as_one_of_studios_own
 	test_every_expression_is_balanced
@@ -34,7 +38,7 @@ def main [--kind: string = ""] {
 	test_the_parameters_are_the_engines_bounds
 	test_the_roles_and_services_of_a_cluster
 	test_who_is_not_judged_and_what_the_bindings_do
-	if $kind != "" { test_the_api_server $kind }
+	if $kind == "new" { with-own-cluster {|context| test_the_api_server $context } } else if $kind != "" { test_the_api_server $kind }
 	print "\nAll tenant admission tests passed."
 }
 
@@ -485,7 +489,8 @@ def externalsecret-cases [ns: string]: nothing -> list {
 	assert equal $r.exit_code 0 $r.stderr
 	let c = ($r.stdout | from json)
 	let allowed = ($c.allowed | transpose name case | each {|t| {what: $"an ExternalSecret that ($t.name)", obj: $t.case.object, says: ""} })
-	let refused = ($c.refused | transpose name case | each {|t| {what: $"an ExternalSecret that ($t.name)", obj: $t.case.object, says: externalsecrets} })
+	# the CRD's own schema refuses some before any policy runs (`crd`: its words), which is then the answer
+	let refused = ($c.refused | transpose name case | each {|t| {what: $"an ExternalSecret that ($t.name)", obj: $t.case.object, says: (if ($t.case.crd? | default "") != "" { $"crd:($t.case.crd)" } else { "externalsecrets" })} })
 	$allowed | append $refused
 }
 
@@ -493,10 +498,41 @@ def externalsecret-cases [ns: string]: nothing -> list {
 def ensure-eso-crds [context: string]: nothing -> bool {
 	let have = (^kubectl --context $context get crd externalsecrets.external-secrets.io --ignore-not-found -o name | complete)
 	if ($have.stdout | str trim | is-not-empty) { return true }
-	let applied = (^kubectl --context $context apply --server-side --force-conflicts -f https://raw.githubusercontent.com/external-secrets/external-secrets/v0.10.5/deploy/crds/bundle.yaml | complete)
+	# the bundle of the tag, held to the digest it had when this was written: a moved tag or a changed file is not applied
+	let file = (mktemp --suffix .yaml)
+	let got = (^curl -fsSL -o $file https://raw.githubusercontent.com/external-secrets/external-secrets/v0.10.5/deploy/crds/bundle.yaml | complete)
+	if $got.exit_code != 0 { print $"  \(the ExternalSecret CRDs could not be fetched: ($got.stderr | str trim)\)"; return false }
+	let sum = (open --raw $file | hash sha256)
+	if $sum != $eso_crds_sha256 { rm -f $file; error make {msg: $"the ExternalSecret CRD bundle of v0.10.5 is ($sum), not ($eso_crds_sha256)"} }
+	let applied = (^kubectl --context $context apply --server-side --force-conflicts -f $file | complete)
+	rm -f $file
 	if $applied.exit_code != 0 { print $"  \(the ExternalSecret CRDs could not be installed: ($applied.stderr | str trim | str substring 0..200)\)"; return false }
 	^kubectl --context $context wait --for=condition=Established crd/externalsecrets.external-secrets.io --timeout=60s | complete | ignore
 	true
+}
+
+# The Deny bindings are applied with --force-conflicts and the CRDs of an operator with them: never on a cluster that is somebody's (contabo, a Studio dev cluster).
+# Only a kind cluster of this harness's own naming, whose API server is on this machine, and where no namespace but this test's carries the tenant label.
+def guard-cluster [context: string] {
+	assert ($context | str starts-with "kind-admission-test-") $"--kind takes 'new' or a context named kind-admission-test-<n>, not ($context): the policies are applied with a Deny binding"
+	let shown = (^kubectl --context $context config view --minify -o 'jsonpath={.clusters[0].cluster.server}' | complete)
+	assert equal $shown.exit_code 0 $"no kube context ($context): ($shown.stderr)"
+	let url = ($shown.stdout | str trim)
+	assert ($url =~ '^https://(127\.0\.0\.1|localhost|\[::1\]):') $"($context)'s API server is ($url), not on this machine"
+	let labelled = (^kubectl --context $context get namespace -l $label -o name | complete)
+	assert equal $labelled.exit_code 0 $labelled.stderr
+	let others = ($labelled.stdout | lines | where {|l| $l != "" and $l != $"namespace/($tenant_ns)" })
+	assert ($others | is-empty) $"($context) has namespaces with the tenant label besides this test's: ($others | str join ' ')"
+}
+
+# A kind cluster of this run's own, deleted whatever the body does.
+def with-own-cluster [body: closure] {
+	let name = $"admission-test-($nu.pid)"
+	let made = (^kind create cluster --name $name --wait 120s | complete)
+	assert equal $made.exit_code 0 $made.stderr
+	let r = (try { do $body $"kind-($name)"; {ok: true, msg: ""} } catch {|e| {ok: false, msg: $e.msg} })
+	^kind delete cluster --name $name | complete | ignore
+	if not $r.ok { error make {msg: $r.msg} }
 }
 
 def verdict [r: record]: nothing -> string {
@@ -504,6 +540,7 @@ def verdict [r: record]: nothing -> string {
 }
 
 def test_the_api_server [context: string] {
+	guard-cluster $context
 	print $"test the API server of ($context) refuses each bad object by its policy and admits the good ones, a namespace without the tenant label is not judged, and a controller's pod is not either..."
 	let crd = (^kubectl --context $context get crd clusters.postgresql.cnpg.io --ignore-not-found -o name | complete)
 	let has_cnpg = ($crd.stdout | str trim | is-not-empty)
@@ -539,9 +576,10 @@ def test_the_api_server [context: string] {
 		if (not $has_cnpg) and ($c.obj.kind == Cluster) { continue }
 		if (not $has_eso) and ($c.obj.kind == ExternalSecret) { continue }
 		let got = (verdict (kubectl-in $context ($c.obj | to json) apply --dry-run=server -f -))
-		if $got != $c.says { $failed = ($failed | append $"($c.what): wanted '($c.says)', got '($got)'") }
+		let ok = if ($c.says | str starts-with "crd:") { ($got | str starts-with "other:") and ($got | str contains ($c.says | str replace "crd:" "")) } else { $got == $c.says }
+		if not $ok { $failed = ($failed | append $"($c.what): wanted '($c.says)', got '($got)'") }
 	}
-	for c in (cases $plain_ns | where says != "") {
+	for c in (cases $plain_ns | where {|c| $c.says != "" and not ($c.says | str starts-with "crd:") }) {
 		if (not $has_cnpg) and ($c.obj.kind == Cluster) { continue }
 		if (not $has_eso) and ($c.obj.kind == ExternalSecret) { continue }
 		let got = (verdict (kubectl-in $context ($c.obj | to json) apply --dry-run=server -f -))
