@@ -45,6 +45,7 @@ def main [] {
 	test_a_file_is_created_with_its_mode_not_widened_then_narrowed
 	test_apply_exits_1_on_critical_drift_after_writing
 	test_the_alarm_rings_before_the_kubelet_evicts
+	test_the_disk_watch_lows_mounts_the_unit_hides_a_quote_and_a_threshold_past_the_kubelet
 	print "\nAll node host tests passed."
 }
 
@@ -891,4 +892,19 @@ def test_the_alarm_rings_before_the_kubelet_evicts [] {
 	assert (not (host-with (do $w 85)).ok) "at the imagefs line: the kubelet evicts at 85% used"
 	assert equal (host-with $"{kubelet: ($kubelet), diskWatch: {notifyUrl: \"https://a.org/t\"}}").host.diskWatch.thresholdPercent 75 "the default is under it"
 	assert equal (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", thresholdPercent: 99}}").host.diskWatch.thresholdPercent 99 "without a kubelet there is no line to read"
+}
+
+def test_the_disk_watch_lows_mounts_the_unit_hides_a_quote_and_a_threshold_past_the_kubelet [] {
+	print "test a mount the unit hides, a quote or backslash in the URL, and an alarm at or past the kubelet's eviction line are refused..."
+	for m in ["/home" "/home/a" "/root" "/run/user/0" "/tmp" "/tmp/x" "/var/tmp" "/dev" "/dev/shm"] {
+		assert (not (host-with $"{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: [\"($m)\"]}}").ok) $"($m) is hidden from the unit"
+	}
+	assert (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: [\"/var/lib/rancher\", \"/homestead\", \"/tmpdata\"]}}").ok "a name that only starts like one is fine"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\\\"x\"}}").ok) "a double quote in the URL"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\\\\x\"}}").ok) "a backslash in the URL"
+	let kubelet = {maxPods: 150, evictionHard: {memory: "100Mi", nodefs: 10, nodefsInodes: 5, imagefs: 15, imagefsInodes: 5}, evictionMinimumReclaim: {nodefs: "5Gi", imagefs: "5Gi"}, imageGC: {high: 80, low: 70}}
+	let ok = ((with-watch) | merge {kubelet: $kubelet})
+	assert equal (render $ok | length) 8 "rendering vets both sections: 75% is under the 85% line"
+	let late = (try { render ($ok | merge {diskWatch: ($ok.diskWatch | merge {thresholdPercent: 85})}); "rendered" } catch {|e| $e.msg })
+	assert str contains $late "kubelet and diskWatch are not what #Host allows together"
 }

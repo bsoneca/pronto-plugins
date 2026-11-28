@@ -113,13 +113,15 @@ import "list"
 	mounts: *["/", "/var/lib/containerd", "/var/lib/rancher"] | [#Mount, ...#Mount]
 	thresholdPercent: *75 | (int & >=10 & <=99)
 	renotifyMinutes:  *360 | (int & >=5)
-	// An https URL with no quote, space or control character (it is written single-quoted into a settings file).
-	notifyUrl!: =~"^https://[^'\\s\\x00-\\x1f\\x7f]+$"
+	// An https URL with no quote, backslash, space or control character (it is written single-quoted into a settings file that systemd parses).
+	notifyUrl!: =~"^https://[^'\"\\\\\\s\\x00-\\x1f\\x7f]+$"
 	// A systemd OnCalendar expression, every minute by default; one line and no backslash, as dockerGC's.
 	onCalendar: *"minutely" | (string & =~"^[^\n\r\\\\]+$")
 }
 
-#Mount: string & =~"^/[A-Za-z0-9._/-]*$"
+// Not under /home, /root, /run/user, /tmp, /var/tmp or /dev: the unit hides them (ProtectHome, PrivateTmp, PrivateDevices), so df would read the
+// unit's own empty view and the alarm would watch the wrong disk.
+#Mount: string & =~"^/[A-Za-z0-9._/-]*$" & !~"^/(home|root|run/user|tmp|var/tmp|dev)(/|$)"
 
 // The workloads that must outlive an eviction (PRONTO-2061): the kubelet evicts the lowest priority first, and a pod with no
 // priority class goes before a system one. host.nu only checks (a class is set by the workload's own manifest, in the repository that

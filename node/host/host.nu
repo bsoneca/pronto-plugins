@@ -75,6 +75,17 @@ export def vet [host: record] {
 		rm -f $h
 		if $v.exit_code != 0 { error make {msg: $"node-host: the host's daprHeal is not what #Host allows: ($v.stderr | str trim)"} }
 	}
+	# The alarm must ring before the kubelet evicts: #Host holds that across the two sections, so both are vetted whole when both are set.
+	if ($host.kubelet? != null) and ($host.diskWatch? != null) {
+		let both = (mktemp --tmpdir node-host-vet-XXXXXX.json)
+		{dockerGC: $host.dockerGC, kubelet: $host.kubelet, diskWatch: $host.diskWatch} | to json | save --force --raw $both
+		let b = (try { do { ^cue vet -c ($here | path join schema host.cue) $both -d '#Host' } | complete } catch {
+			rm -f $both
+			error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
+		})
+		rm -f $both
+		if $b.exit_code != 0 { error make {msg: $"node-host: the host's kubelet and diskWatch are not what #Host allows together: ($b.stderr | str trim)"} }
+	}
 	for sec in [[key def]; ["diskWatch" "#DiskWatch"] ["critical" "#Critical"]] {
 		let v = ($host | get --optional $sec.key)
 		if $v == null { continue }
