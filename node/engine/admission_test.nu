@@ -27,6 +27,7 @@ def main [--kind: string = ""] {
 	test_cnpg_labels_escalation_capabilities_and_metadata
 	test_services_and_secrets
 	test_an_externalsecret_takes_no_superuser_secret_as_a_template_source
+	test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone
 	test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template
 	test_an_enum_value_is_compared_as_the_engine_compares_it
 	test_a_cluster_is_held_to_the_engines_allow_list
@@ -226,6 +227,20 @@ def test_an_externalsecret_takes_no_superuser_secret_as_a_template_source [] {
 	assert ($rule | str contains "object.spec.target.template.templateFrom") $rule
 	let r = ((policies).externalsecrets.spec.matchConstraints.resourceRules)
 	assert equal $r [{apiGroups: [external-secrets.io], apiVersions: ["*"], operations: [CREATE UPDATE], resources: [externalsecrets]}]
+}
+
+def test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone [] {
+	print "test an ExternalSecret has no secretStoreRef, no data and dataFrom entries that draw a Password generator alone, each read off #TenantExternalSecret (PRONTO-2146)..."
+	let tes = (schema '#TenantExternalSecret')
+	let store = (one-rule externalsecrets "names no store")
+	for k in $tes.noStore { assert ($store | str contains $"!has\(object.spec.($k)\)") $store }
+	let data = (one-rule externalsecrets "no spec.data")
+	for k in $tes.emptyLists { assert ($data | str contains $"size\(object.spec.($k)\) == 0") $data }
+	let from = (one-rule externalsecrets "draw from a generator alone")
+	for k in ($tes.dataFrom | append $tes.sourceRef | append $tes.generatorRef | append $tes.generatorKinds) { assert ($from | str contains $"'($k)'") $"($k): ($from)" }
+	assert ($from | str contains $"== '($tes.generatorAPIVersion)'") $from
+	# the policy has no way to name a store: none of the words that read one is allowed by a list
+	for w in [extract find storeRef remoteRef] { assert (not ($from | str contains $"'($w)'")) $"the dataFrom rule allows ($w): ($from)" }
 }
 
 def test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template [] {

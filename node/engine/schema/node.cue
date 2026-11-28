@@ -251,6 +251,22 @@ import (
 // exact names (a legacy Cluster's own superuserSecret too); the admission policy, which cannot read the namespace's Clusters, holds the suffixes.
 #TenantGuardedSecretSuffixes: ["-superuser", "-db-postgres"]
 
+// What a tenant's ExternalSecret may be (PRONTO-2146): a Password generator's value renamed into the release's own Secret, as upstream's `<app>-db-postgres` and the engine's
+// database.logins write it, and nothing that reads a store. An ExternalSecret that names a store (`secretStoreRef`, `data[].remoteRef`, `dataFrom[].extract|find`, `sourceRef.storeRef`)
+// is read by the operator's external-secrets controller with the store's own credentials, so a tenant that names a ClusterSecretStore (or a SecretStore of another namespace's
+// credentials) would copy another tenant's or the operator's secrets into its own namespace. One list, read by the schema's violations, tenant.nu's check-objects and the
+// `-engine-externalsecrets` admission policy: a spec holds no key of `noStore`, no entry in a list of `emptyLists`, and each dataFrom entry holds only the keys of `dataFrom`,
+// its sourceRef those of `sourceRef`, its generatorRef those of `generatorRef`, of a kind in `generatorKinds` and (when it says) the `generatorAPIVersion`.
+#TenantExternalSecret: {
+	generatorAPIVersion: "generators.external-secrets.io/v1alpha1"
+	generatorKinds: ["Password"]
+	noStore: ["secretStoreRef"]
+	emptyLists: ["data"]
+	dataFrom: ["sourceRef", "rewrite"]
+	sourceRef: ["generatorRef"]
+	generatorRef: ["apiVersion", "kind", "name"]
+}
+
 // The annotation prefixes no tenant Cluster carries: `cnpg.io/podPatch`, `cnpg.io/validation` and `cnpg.io/reconcilePodSpec` make the operator rewrite the instance pod (its image,
 // the superuser's Secret it reads, its service account), which the engine fixes by never letting a tenant's Cluster say so. Read by tenant.nu's check-objects and by the
 // cluster's admission policies (#TenantAdmission).
@@ -501,6 +517,16 @@ import (
 				validations: [{
 					expression: "!has(object.spec.target) || !has(object.spec.target.template) || !has(object.spec.target.template.templateFrom) || object.spec.target.template.templateFrom.all(t, !has(t.secret) || !(\(strings.Join([for x in #TenantGuardedSecretSuffixes {"t.secret.name.endsWith('\(x)')"}], " || "))))"
 					message:    "a tenant's ExternalSecret takes no database superuser Secret as a template source (#TenantGuardedSecretSuffixes)"
+				}, {
+					// PRONTO-2146: no store of any kind, and a Password generator's value alone (#TenantExternalSecret)
+					expression: strings.Join([for k in #TenantExternalSecret.noStore {"!has(object.spec.\(k))"}], " && ")
+					message:    "a tenant's ExternalSecret names no store: no spec.secretStoreRef (#TenantExternalSecret)"
+				}, {
+					expression: strings.Join([for k in #TenantExternalSecret.emptyLists {"(!has(object.spec.\(k)) || size(object.spec.\(k)) == 0)"}], " && ")
+					message:    "a tenant's ExternalSecret has no spec.data: a lookup in a store is the operator's (#TenantExternalSecret)"
+				}, {
+					expression: "!has(object.spec.dataFrom) || object.spec.dataFrom.all(d, d.all(k, k in [\(strings.Join([for k in #TenantExternalSecret.dataFrom {"'\(k)'"}], ", "))]) && has(d.sourceRef) && d.sourceRef.all(k, k in [\(strings.Join([for k in #TenantExternalSecret.sourceRef {"'\(k)'"}], ", "))]) && has(d.sourceRef.generatorRef) && d.sourceRef.generatorRef.all(k, k in [\(strings.Join([for k in #TenantExternalSecret.generatorRef {"'\(k)'"}], ", "))]) && d.sourceRef.generatorRef.kind in [\(strings.Join([for k in #TenantExternalSecret.generatorKinds {"'\(k)'"}], ", "))] && (!has(d.sourceRef.generatorRef.apiVersion) || d.sourceRef.generatorRef.apiVersion == '\(#TenantExternalSecret.generatorAPIVersion)'))"
+					message:    "a tenant's ExternalSecret has spec.dataFrom entries that draw from a generator alone (#TenantExternalSecret): no extract, find or storeRef"
 				}]
 			}
 		},
@@ -1081,6 +1107,37 @@ import (
 		[if publisher if release.blobs != _|_ {"a tenant's release runs no blob plane: it signs in to Google as the operator's account"}],
 		[if publisher if release.metricsExport != _|_ {"a tenant's release runs no metrics export: it signs in to Google as the operator's account"}],
 		[if publisher if app.externalSecrets != _|_ if app.externalSecrets.enabled {"a tenant's release reads no ClusterSecretStore: the app's externalSecrets must be off"}],
+		// PRONTO-2146: a tenant's ExternalSecret reads no store (#TenantExternalSecret); tenant.nu's check-objects and the `-engine-externalsecrets` policy hold the same list.
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ for k in #TenantExternalSecret.noStore if o.spec[k] != _|_ {
+			"ExternalSecret/\(o.metadata.name) sets spec.\(k), which names a store: a tenant's ExternalSecret reads none (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ for k in #TenantExternalSecret.emptyLists if o.spec[k] != _|_ if len(o.spec[k]) > 0 {
+			"ExternalSecret/\(o.metadata.name) sets spec.\(k), a lookup in a store: a tenant's ExternalSecret reads none (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom for k, _ in e if !list.Contains(#TenantExternalSecret.dataFrom, k) {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)] sets \(k), which a tenant's ExternalSecret may not (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef == _|_ {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)] has no sourceRef.generatorRef (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef != _|_ for k, _ in e.sourceRef if !list.Contains(#TenantExternalSecret.sourceRef, k) {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)].sourceRef sets \(k), a store: a tenant's ExternalSecret draws from a generator alone (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef != _|_ if e.sourceRef.generatorRef == _|_ {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)].sourceRef has no generatorRef (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef != _|_ if e.sourceRef.generatorRef != _|_ for k, _ in e.sourceRef.generatorRef if !list.Contains(#TenantExternalSecret.generatorRef, k) {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)].sourceRef.generatorRef sets \(k), which a tenant's ExternalSecret may not (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef != _|_ if e.sourceRef.generatorRef != _|_ if e.sourceRef.generatorRef.kind == _|_ {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)] draws from a generator with no kind (#TenantExternalSecret.generatorKinds)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef != _|_ if e.sourceRef.generatorRef != _|_ if e.sourceRef.generatorRef.kind != _|_ if !list.Contains(#TenantExternalSecret.generatorKinds, e.sourceRef.generatorRef.kind) {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)] draws from a generator of kind \(e.sourceRef.generatorRef.kind), which is no Password (#TenantExternalSecret.generatorKinds)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ if o.spec.dataFrom != _|_ for i, e in o.spec.dataFrom if e.sourceRef != _|_ if e.sourceRef.generatorRef != _|_ if e.sourceRef.generatorRef.apiVersion != _|_ if e.sourceRef.generatorRef.apiVersion != #TenantExternalSecret.generatorAPIVersion {
+			"ExternalSecret/\(o.metadata.name) spec.dataFrom[\(i)] draws from a generator of \(e.sourceRef.generatorRef.apiVersion), not \(#TenantExternalSecret.generatorAPIVersion) (#TenantExternalSecret)"
+		}],
 		[if publisher for o in _all if !list.Contains(#PublisherKinds, "\(o.apiVersion)/\(o.kind)") {
 			"\(o.kind)/\(o.metadata.name) is not a kind a tenant's publisher writes (#PublisherKinds)"
 		}],

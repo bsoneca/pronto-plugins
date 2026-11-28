@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/bsoneca/pronto-plugins/node/engine/schema"
+	"github.com/bsoneca/pronto-plugins/node/engine/tests/externalsecret"
 )
 
 // A tenant's release (PRONTO-740 S2): the one a namespace's publisher makes, in the namespace its provisioner made, at the one
@@ -29,9 +30,22 @@ _tenantExtra: [
 
 _tenant: schema.#Manifests & {
 	release:  schema.#Release & _tenantBase
-	app: {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
+	app:      {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
 	upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra])
 }
+
+// A tenant's render with `extra` objects beside upstream's: what it is refused for (PRONTO-2146: #TenantExternalSecret).
+_tenantRefuse: {
+	extra: [...]
+	_m: schema.#Manifests & {
+		release:  schema.#Release & _tenantBase
+		upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra, extra])
+		app:      {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
+	}
+	violations: _m.violations
+}
+
+_tenantES: externalsecret.#Cases & {ns: _tenantNs}
 
 cases: {
 	"a tenant release lives in its namespace, at its host, under its own path of the registry": {
@@ -59,14 +73,14 @@ cases: {
 		_want: []
 	}
 	"the door's invoke-only Configuration is written for a tenant too": {
-		_got: [for o in _tenant.objects if o.kind == "Configuration" {o.metadata.name}]
+		_got:  [for o in _tenant.objects if o.kind == "Configuration" {o.metadata.name}]
 		_want: ["app-dapr-config", "app-caddy-invoke-only"]
 	}
 	"a tenant's quota, limit range and egress are its provisioner's: none is written": {
 		_t: schema.#Manifests & {
 			release:  schema.#Release & _tenantBase & {tenant: quota: pods: 12}
 			upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra])
-			app: {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
+			app:      {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
 		}
 		_got:  [for o in _t.objects if o.kind == "ResourceQuota" || o.kind == "LimitRange" || o.kind == "NetworkPolicy" {o.kind}]
 		_want: []
@@ -97,13 +111,26 @@ cases: {
 		_t: schema.#Manifests & {
 			release:  schema.#Release & _tenantBase
 			upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra])
-			app: {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "17", digest: "sha256:\(_d)"}}
+			app:      {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "17", digest: "sha256:\(_d)"}}
 		}
-		_got:  [for o in _t.objects if o.kind == "Cluster" {strings.Contains(o.spec.imageName, "\(_tenantNs)/") && strings.Contains(o.spec.imageName, "-database-base") }]
+		_got:  [for o in _t.objects if o.kind == "Cluster" {strings.Contains(o.spec.imageName, "\(_tenantNs)/") && strings.Contains(o.spec.imageName, "-database-base")}]
 		_want: [true]
 	}
 	"a tenant's build is the tenants' buildkitd by default": {
 		_got:  _tenant.release.tenant.buildkit
 		_want: "tcp://buildkitd.pronto-buildkit-tenants.svc:1234"
+	}
+	// PRONTO-2146: #TenantExternalSecret, the cases of tests/externalsecret
+	for n, c in _tenantES.allowed {
+		"a tenant's ExternalSecret that \(n) is refused for nothing": {
+			_got:  (_tenantRefuse & {extra: [c.object]}).violations
+			_want: c.says
+		}
+	}
+	for n, c in _tenantES.refused {
+		"a tenant's ExternalSecret that \(n) is refused": {
+			_got:  (_tenantRefuse & {extra: [c.object]}).violations
+			_want: c.says
+		}
 	}
 }
