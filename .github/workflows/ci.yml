@@ -2,12 +2,14 @@
 # tests, the intents' cases (tests/unit/*.cue), the deno tests of the brokers and installers, and
 # the Android host's Kotlin unit tests.
 #
-# It holds no secrets and runs on pull_request only, with a read-only token; every action is
-# pinned by commit.
+# It holds no secrets and runs on pull_request and on main's pushes, with a read-only token; every
+# action is pinned by commit. Main's run exists to write the Gradle cache a pull request can read.
 name: ci
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
