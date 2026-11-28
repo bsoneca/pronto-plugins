@@ -695,7 +695,7 @@ check ($wmr.exit_code == 0 and ($wmr.stdout | from json | transpose k v | where 
 # (3) The record is of the version the push wrote: where live has moved on, it is skipped, said and noted.
 let rec3 = (recorded | length)
 let sk = (rlive [record $app --version $v_f1 --flags premium])
-check ($sk.exit_code == 0 and ($sk.stderr | str contains "moved on") and (recorded | length) == $rec3 and ((open --raw $"($dir)/journal.jsonl" | lines | last | from json).record == "skipped")) "record: live moved on since the version: skipped, said, noted"
+check ($sk.exit_code != 0 and ($sk.stderr | str contains "moved on") and (recorded | length) == $rec3 and ((open --raw $"($dir)/journal.jsonl" | lines | last | from json).record == "skipped")) "record: live moved on since the version: skipped, said, noted, and the exit is not 0"
 
 # (7) The splice: a canonical block changes only the literal; a reference, a second default or no default is refused.
 let canon = $"($dir)/canon.cue"
@@ -709,6 +709,19 @@ for text in ["flags: r: {default: _d}\n" "flags: r: {default: false, x: {default
 	let r = (splice-file $bad r "true")
 	check ($r.exit_code != 0 and ($r.stderr | str contains "flags: record:") and (open --raw $bad) == $text) $"splice: refused, the file as it was: ($text | str trim)"
 }
+
+# (7b) The nested shape (aprende's): `<name>: {` inside a column-0 `flags: {` block changes only its own literal; two blocks are refused.
+let nest = $"($dir)/nest.cue"
+"package x\nflags: {\n\tpremium: {\n\t\tdefault: false // off\n\t\tlocal: true\n\t}\n\ttheme: {\n\t\tdefault: \"light\"\n\t}\n}\n" | save -f $nest
+let nsp = (splice-file $nest premium "true")
+check ($nsp.exit_code == 0 and ($nsp.stdout | str contains "\t\tdefault: true // off") and ($nsp.stdout | str contains "default: \"light\"") and not ($nsp.stdout | str contains "default: false")) "splice: a flag nested in `flags: {` changes only its own default"
+let nsp2 = (splice-file $nest theme "\"dark\"")
+check ($nsp2.exit_code == 0 and ($nsp2.stdout | str contains "default: \"dark\"") and ($nsp2.stdout | str contains "default: false // off")) "splice: a second nested flag is found by its own name"
+let nbad = $"($dir)/nbad.cue"
+let ntext = "package x\nflags: premium: {default: false}\nflags: {\n\tpremium: {default: false}\n}\n"
+$ntext | save -f $nbad
+let nr = (splice-file $nbad premium "true")
+check ($nr.exit_code != 0 and ($nr.stderr | str contains "not one") and (open --raw $nbad) == $ntext) "splice: the flag in both shapes is ambiguous and refused, the file as it was"
 
 # ---- The real record, in a scratch worktree of the app's repo, with a git origin and a gh stand-in ----
 let rorigin = $"($dir)/rorigin.git"
@@ -1583,7 +1596,7 @@ for bad in ["../rec/flags_spec.cue" "/etc/hosts" "spec/missing.cue" "spec/link.c
 	let rb = (rrun [record $gapp])
 	# The schema refuses an absolute path or a `..` outright (the tool stops, nothing is read); a path that is no file is the record's own soft failure.
 	let hard = ($bad | str starts-with "/") or ($bad | str starts-with "..")
-	let refused = if $hard { $rb.exit_code != 0 and ($rb.stderr | str contains "flagsRecord.file") } else { $rb.exit_code == 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "flagsRecord.file") }
+	let refused = if $hard { $rb.exit_code != 0 and ($rb.stderr | str contains "flagsRecord.file") } else { $rb.exit_code != 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "flagsRecord.file") }
 	check ($refused and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-gen | str trim) == $head_before) $"record source: ($bad) is refused, nothing pushed"
 }
 
