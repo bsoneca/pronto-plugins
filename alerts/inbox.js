@@ -131,3 +131,18 @@ export const jobEnv = ({ env, os = "darwin", home, gcloud }) => ({
 
 // The last lines of a command's stderr, for an error that must say why it failed: a few lines, each cut short.
 export const tailOf = (text, lines = 5, width = 300) => text.split("\n").map((l) => l.trim()).filter(Boolean).slice(-lines).map((l) => l.slice(0, width)).join(" | ");
+
+// The permissions the launchd job runs with: only what the driver uses. The job's code (`wt`) and its inbox folder (`cache`) are disjoint
+// folders, never one inside the other: Deno 2.5 refuses to make a folder that holds a denied one (a `--deny-write` of a child makes a
+// recursive mkdir of the parent NotCapable), and the job can then write its inbox or have a code folder it could write, never both.
+export const jobFlags = ({ wt, cache, hosts, gcloud }) => {
+  const inside = (a, b) => a === b || a.startsWith(b + "/");
+  if (inside(wt, cache) || inside(cache, wt)) throw new Error(`the job's code ${wt} and its inbox folder ${cache} must be separate folders`);
+  return [
+    `--allow-net=${hosts.join(",")}`,
+    `--allow-read=${wt},${cache}`,
+    `--allow-write=${cache}`,
+    `--allow-run=/usr/bin/security,${gcloud}`,
+    "--allow-env=HOME,PATH,CLOUDSDK_PYTHON,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
+  ];
+};

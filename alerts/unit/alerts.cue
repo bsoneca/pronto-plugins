@@ -266,4 +266,12 @@ cases: {
 		{use: "run"},
 		{get: "results.0", holds: {written: 1, acked: 1}},
 	]}
+	"the job's permissions name its inbox folder and its code folder as two separate folders, with no deny inside an allow": {suite: "alerts", steps: [
+		{call: "alerts.jobFlags", args: [{wt: "/h/.cache/pronto/alerts-code", cache: "/h/.cache/pronto/alerts", hosts: ["pubsub.googleapis.com", "ntfy.example.com"], gcloud: "/g/gcloud"}], expect: [
+			"--allow-net=pubsub.googleapis.com,ntfy.example.com", "--allow-read=/h/.cache/pronto/alerts-code,/h/.cache/pronto/alerts", "--allow-write=/h/.cache/pronto/alerts", "--allow-run=/usr/bin/security,/g/gcloud", "--allow-env=HOME,PATH,CLOUDSDK_PYTHON,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
+		], why: "no --deny-write: the code folder is simply not writable"
+		},
+		{call: "alerts.jobFlags", args: [{wt: "/h/.cache/pronto/alerts/wt", cache: "/h/.cache/pronto/alerts", hosts: [], gcloud: "/g"}], throws: "must be separate folders", why: "Deno 2.5 makes a recursive mkdir of the parent fail when a child is denied (found at the first install)"},
+		{call: "alerts.jobFlags", args: [{wt: "/h/.cache/pronto", cache: "/h/.cache/pronto/alerts", hosts: [], gcloud: "/g"}], throws: "must be separate folders"},
+	]}
 }
