@@ -622,7 +622,7 @@ export def approved-cluster-image [image: any, node: record]: nothing -> bool {
 }
 
 # The Clusters already in the namespace, as its publisher reads them (none: an empty list).
-def live-cluster-items [namespace: string]: nothing -> list {
+export def live-cluster-items [namespace: string]: nothing -> list {
 	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
 	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
 	if ($r.stdout | str trim | is-empty) { return [] }
@@ -637,33 +637,46 @@ def superuser-migrations [items: list, objects: list]: nothing -> list<string> {
 }
 
 # The Secrets the Clusters already in the namespace name as their `superuserSecret` (a legacy Cluster with superuser access on keeps the login whatever this release
-# renders): no workload of this release reads them either. Not those of a Cluster this release migrates off the superuser (`migrate-superuser` does it before any
-# object of the release is applied): that Secret holds no login after it.
-export def live-superuser-secrets [namespace: string, objects: list = []]: nothing -> list<string> {
-	let items = (live-cluster-items $namespace)
-	let moving = (superuser-migrations $items $objects)
-	$items | where {|c| ($c.metadata?.name? | default "") not-in $moving } | each {|c| $c.spec?.superuserSecret?.name? | default "" } | where {|n| $n != "" }
+# renders): no workload of this release reads them. All of them, a migrated Cluster's too: its login is gone only when CloudNativePG has acted on the patch, which the
+# engine does not wait for, so only the ExternalSecret-write guard is lifted for those (`migrating-secrets`, check-objects' `lifted`), never the read guard.
+export def live-superuser-secrets [items: list]: nothing -> list<string> {
+	$items | each {|c| $c.spec?.superuserSecret?.name? | default "" } | where {|n| $n != "" }
 }
 
-# Takes the live Clusters `superuser-migrations` names off the superuser, as the namespace's publisher, before the release applies anything else: the engine's own
-# patch, never one by hand, so no Secret of the release is written while a login still stands. Returns the names it patched.
-export def migrate-superuser [namespace: string, objects: list]: nothing -> list<string> {
-	let names = (superuser-migrations (live-cluster-items $namespace) $objects)
-	for n in $names {
-		let r = (^kubectl patch $"cluster.postgresql.cnpg.io/($n)" -n $namespace --type merge -p ({spec: {enableSuperuserAccess: false, superuserSecret: null}} | to json --raw) | complete)
-		if $r.exit_code != 0 { error make {msg: $"taking the database cluster ($n) off the postgres superuser failed: ($r.stderr | str trim)"} }
+# The superuserSecrets of the Clusters this release migrates off the superuser: the release's ExternalSecret may write them once `migrate-superuser` has patched the Cluster, before any object is applied.
+export def migrating-secrets [items: list, objects: list]: nothing -> list<string> {
+	let moving = (superuser-migrations $items $objects)
+	$items | where {|c| ($c.metadata?.name? | default "") in $moving } | each {|c| $c.spec?.superuserSecret?.name? | default "" } | where {|n| $n != "" }
+}
+
+# Takes the Clusters `superuser-migrations` names (read once, at check time: `items`) off the superuser, as the namespace's publisher, before the release applies anything
+# else, by the engine's own patch and never one by hand. The patch is the rendered Cluster's spec, the object the dry run approved (the legacy Cluster predates the engine's
+# uid, image and field rules, which the admission policy judges on the whole object), with no `superuserSecret`. The server judges every patch first (a dry run), so a refusal stops
+# the release before any Cluster is written. Returns the names it patched.
+export def migrate-superuser [namespace: string, objects: list, items: list]: nothing -> list<string> {
+	let names = (superuser-migrations $items $objects)
+	let bodies = ($names | each {|n|
+		let c = ($objects | where {|o| ($o.kind? | default "") == "Cluster" and ($o.metadata?.name? | default "") == $n } | first)
+		{name: $n, body: ({spec: ($c.spec | upsert superuserSecret null)} | to json --raw)}
+	})
+	for dry in [true false] {
+		for b in $bodies {
+			let r = if $dry {
+				^kubectl patch $"cluster.postgresql.cnpg.io/($b.name)" -n $namespace --type merge --dry-run=server -p $b.body | complete
+			} else {
+				^kubectl patch $"cluster.postgresql.cnpg.io/($b.name)" -n $namespace --type merge -p $b.body | complete
+			}
+			if $r.exit_code != 0 { error make {msg: $"taking the database cluster ($b.name) off the postgres superuser failed: ($r.stderr | str trim)"} }
+		}
 	}
 	$names
 }
 
-export def live-clusters [namespace: string]: nothing -> list<string> {
-	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
-	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
-	if ($r.stdout | str trim | is-empty) { return [] }
-	$r.stdout | from json | get -o items | default [] | each {|c| $c.metadata?.name? | default "" } | where {|n| $n != "" }
+export def cluster-names [items: list]: nothing -> list<string> {
+	$items | each {|c| $c.metadata?.name? | default "" } | where {|n| $n != "" }
 }
 
-export def check-objects [objects: list, node: record, kinds: list<string>, live: list<string> = [], live_secrets: list<string> = []] {
+export def check-objects [objects: list, node: record, kinds: list<string>, live: list<string> = [], live_secrets: list<string> = [], lifted: list<string> = []] {
 	let ns = $node.namespace
 	let prefix = $"127.0.0.1:5000/($ns)/"
 	let refused_metadata = (schema-export '#TenantRefusedMetadata')
@@ -752,7 +765,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			let policy = ($target | get -o creationPolicy)
 			if $policy != null and $policy not-in $tes.creationPolicies { $why = ($why | append $"($id) sets spec.target.creationPolicy ($policy): a tenant's ExternalSecret creates its Secret as its Owner alone \(#TenantExternalSecret\)") }
 			let written = ([$own] | append (if $tname != null { [$tname] } else { [] }) | uniq)
-			if ($written | any {|n| $n in $guarded_secrets or ($tes.superuserSuffixes | any {|x| $n | str ends-with $x }) }) { $why = ($why | append $"($id) writes a Secret that holds a database's superuser password \(#TenantGuardedSecretSuffixes\)") }
+			if ($written | any {|n| ($n in $guarded_secrets and $n not-in $lifted) or ($tes.superuserSuffixes | any {|x| $n | str ends-with $x }) }) { $why = ($why | append $"($id) writes a Secret that holds a database's superuser password \(#TenantGuardedSecretSuffixes\)") }
 			if ($written | any {|n| $n | str ends-with $tes.dbSecretSuffix }) {
 				let want = $"($node.name? | default '')($tes.dbSecretSuffix)"
 				if $own != $want { $why = ($why | append $"($id) writes a database Secret that is not ($want): a tenant's database is the release's own \(#TenantExternalSecret\)") }
