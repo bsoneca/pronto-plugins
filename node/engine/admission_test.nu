@@ -495,20 +495,20 @@ def externalsecret-cases [ns: string]: nothing -> list {
 }
 
 # The ExternalSecret CRDs of the operator version the node runs (#Served: 0.10.5), installed when the cluster has none, as CloudNativePG's are by hand.
-def ensure-eso-crds [context: string]: nothing -> bool {
+def ensure-eso-crds [context: string] {
 	let have = (^kubectl --context $context get crd externalsecrets.external-secrets.io --ignore-not-found -o name | complete)
-	if ($have.stdout | str trim | is-not-empty) { return true }
+	if ($have.stdout | str trim | is-not-empty) { return }
 	# the bundle of the tag, held to the digest it had when this was written: a moved tag or a changed file is not applied
 	let file = (mktemp --suffix .yaml)
 	let got = (^curl -fsSL -o $file https://raw.githubusercontent.com/external-secrets/external-secrets/v0.10.5/deploy/crds/bundle.yaml | complete)
-	if $got.exit_code != 0 { print $"  \(the ExternalSecret CRDs could not be fetched: ($got.stderr | str trim)\)"; return false }
+	if $got.exit_code != 0 { rm -f $file; error make {msg: $"the ExternalSecret CRDs could not be fetched: ($got.stderr | str trim)"} }
 	let sum = (open --raw $file | hash sha256)
 	if $sum != $eso_crds_sha256 { rm -f $file; error make {msg: $"the ExternalSecret CRD bundle of v0.10.5 is ($sum), not ($eso_crds_sha256)"} }
 	let applied = (^kubectl --context $context apply --server-side --force-conflicts -f $file | complete)
 	rm -f $file
-	if $applied.exit_code != 0 { print $"  \(the ExternalSecret CRDs could not be installed: ($applied.stderr | str trim | str substring 0..200)\)"; return false }
-	^kubectl --context $context wait --for=condition=Established crd/externalsecrets.external-secrets.io --timeout=60s | complete | ignore
-	true
+	if $applied.exit_code != 0 { error make {msg: $"the ExternalSecret CRDs could not be installed: ($applied.stderr | str trim | str substring 0..200)"} }
+	let up = (^kubectl --context $context wait --for=condition=Established crd/externalsecrets.external-secrets.io --timeout=60s | complete)
+	assert equal $up.exit_code 0 $up.stderr
 }
 
 # The Deny bindings are applied with --force-conflicts and the CRDs of an operator with them: never on a cluster that is somebody's (contabo, a Studio dev cluster).
@@ -518,20 +518,29 @@ def guard-cluster [context: string] {
 	let shown = (^kubectl --context $context config view --minify -o 'jsonpath={.clusters[0].cluster.server}' | complete)
 	assert equal $shown.exit_code 0 $"no kube context ($context): ($shown.stderr)"
 	let url = ($shown.stdout | str trim)
-	assert ($url =~ '^https://(127\.0\.0\.1|localhost|\[::1\]):') $"($context)'s API server is ($url), not on this machine"
+	let u = (try { $url | url parse } catch { {scheme: "", host: "", username: "?", password: "?"} })
+	assert ($u.scheme == "https") $"($context)'s API server is ($url): not https"
+	assert (($u.username? | default "") == "" and ($u.password? | default "") == "") $"($context)'s API server URL carries credentials: a host before the @ is the one asked"
+	assert (($u.host? | default "") in ["127.0.0.1" "localhost" "[::1]" "::1"]) $"($context)'s API server is on ($u.host? | default ''), not on this machine"
+	let proxy = (^kubectl --context $context config view --minify -o 'jsonpath={.clusters[0].cluster.proxy-url}' | complete)
+	assert (($proxy.stdout | str trim) == "") $"($context)'s cluster entry has a proxy-url ($proxy.stdout | str trim): its requests would leave this machine"
 	let labelled = (^kubectl --context $context get namespace -l $label -o name | complete)
 	assert equal $labelled.exit_code 0 $labelled.stderr
 	let others = ($labelled.stdout | lines | where {|l| $l != "" and $l != $"namespace/($tenant_ns)" })
 	assert ($others | is-empty) $"($context) has namespaces with the tenant label besides this test's: ($others | str join ' ')"
 }
 
-# A kind cluster of this run's own, deleted whatever the body does.
+# A kind cluster of this run's own, deleted whatever the body does (an error, a failed assertion): not on SIGINT or SIGKILL, which leave admission-test-<pid> behind. Delete
+# one by hand with `kind delete cluster --name admission-test-<pid>` (its pid is dead).
 def with-own-cluster [body: closure] {
 	let name = $"admission-test-($nu.pid)"
-	let made = (^kind create cluster --name $name --wait 120s | complete)
-	assert equal $made.exit_code 0 $made.stderr
-	let r = (try { do $body $"kind-($name)"; {ok: true, msg: ""} } catch {|e| {ok: false, msg: $e.msg} })
-	^kind delete cluster --name $name | complete | ignore
+	# a kubeconfig of its own: the caller's current-context is never switched, and nothing but this cluster is in it
+	let kubeconfig = (mktemp --suffix .kubeconfig)
+	let made = (^kind create cluster --name $name --kubeconfig $kubeconfig --wait 120s | complete)
+	if $made.exit_code != 0 { ^kind delete cluster --name $name --kubeconfig $kubeconfig | complete | ignore; rm -f $kubeconfig; error make {msg: $made.stderr} }
+	let r = (try { with-env {KUBECONFIG: $kubeconfig} { do $body $"kind-($name)" }; {ok: true, msg: ""} } catch {|e| {ok: false, msg: $e.msg} })
+	^kind delete cluster --name $name --kubeconfig $kubeconfig | complete | ignore
+	rm -f $kubeconfig
 	if not $r.ok { error make {msg: $r.msg} }
 }
 
@@ -545,8 +554,7 @@ def test_the_api_server [context: string] {
 	let crd = (^kubectl --context $context get crd clusters.postgresql.cnpg.io --ignore-not-found -o name | complete)
 	let has_cnpg = ($crd.stdout | str trim | is-not-empty)
 	if not $has_cnpg { print "  (no CloudNativePG CRD in the cluster: the Cluster cases are not asked)" }
-	let has_eso = (ensure-eso-crds $context)
-	if not $has_eso { print "  (no ExternalSecret CRD in the cluster: the ExternalSecret cases are not asked)" }
+	ensure-eso-crds $context
 	let objects = (schema $"\(#TenantAdmission & {label: \"($label)\", name: \"($policy_prefix)\", actions: [\"Deny\"]}).objects")
 	let applied = (kubectl-in $context ({apiVersion: v1, kind: List, items: $objects} | to json) apply --server-side --force-conflicts --field-manager admission-test -f -)
 	assert equal $applied.exit_code 0 $applied.stderr
@@ -574,14 +582,12 @@ def test_the_api_server [context: string] {
 	mut failed = []
 	for c in (cases $tenant_ns) {
 		if (not $has_cnpg) and ($c.obj.kind == Cluster) { continue }
-		if (not $has_eso) and ($c.obj.kind == ExternalSecret) { continue }
 		let got = (verdict (kubectl-in $context ($c.obj | to json) apply --dry-run=server -f -))
 		let ok = if ($c.says | str starts-with "crd:") { ($got | str starts-with "other:") and ($got | str contains ($c.says | str replace "crd:" "")) } else { $got == $c.says }
 		if not $ok { $failed = ($failed | append $"($c.what): wanted '($c.says)', got '($got)'") }
 	}
 	for c in (cases $plain_ns | where {|c| $c.says != "" and not ($c.says | str starts-with "crd:") }) {
 		if (not $has_cnpg) and ($c.obj.kind == Cluster) { continue }
-		if (not $has_eso) and ($c.obj.kind == ExternalSecret) { continue }
 		let got = (verdict (kubectl-in $context ($c.obj | to json) apply --dry-run=server -f -))
 		if $got != "" { $failed = ($failed | append $"(plain namespace) ($c.what): admitted by no policy, got '($got)'") }
 	}
