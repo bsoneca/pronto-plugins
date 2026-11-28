@@ -227,15 +227,20 @@ export function patch(doc, el, node) {
  *   css: the hatch's own stylesheet (android.json hatches.<name>.css), linked while it is mounted.
  *   every: how a ticked hatch is called each frame (setInterval; a test steps it by hand); returns its stop.
  *   flags: where the module's `ctx.flags` come from, a function returning a promise of `{key: boolean}` (the door's
- *     flags in the Android terminal, none elsewhere). Until it answers `ctx.flags` is `{}` and the view is drawn
- *     again when it does; a rejection is a `PRONTO FAULT` and the flags stay `{}`. `globalThis.__hatchFlags`, when
- *     set, is what a scenario or a test gives instead, and nothing is asked.
+ *     flags in the Android terminal, none elsewhere). Only the keys the module lists in its own `export const flags`
+ *     reach it, and the door is asked only when it lists some. Until it answers `ctx.flags` is `{}` and the view is
+ *     drawn again when it does; a rejection is a `PRONTO FAULT` and the flags stay `{}`. `globalThis.__hatchFlags`,
+ *     when set, is what a scenario or a test gives instead (whole, unfiltered), and nothing is asked.
  */
 export function bound(name, bindingJson, module, { log = console, css = null, every = repeat, flags = defaultFlags } = {}) {
   const binding = bindingOf(bindingJson);
   for (const f of ["init", "view"]) if (typeof module[f] !== "function") throw new Error(`hatch ${name}: the module exports no ${f}`);
   if (binding.hz && typeof module.tick !== "function") throw new Error(`hatch ${name}: a ticked binding needs tick`);
   const fault = (e) => log.error(`PRONTO FAULT hatch ${name}: ${e?.message ?? e}`);
+  // The flags the module reads, by its own `flags` export (a list of keys): only those reach its ctx, so a module that
+  // names none sees `{}` as before, and the door is not asked for it.
+  const wanted = module.flags ?? [];
+  if (!Array.isArray(wanted) || !wanted.every((k) => typeof k === "string")) throw new Error(`hatch ${name}: the module's flags is a list of keys`);
 
   return function mount(screen, { signal } = {}) {
     const doc = screen.ownerDocument;
@@ -374,11 +379,11 @@ export function bound(name, bindingJson, module, { log = console, css = null, ev
     draw();
 
     let stopped = false;
-    if (globalThis.__hatchFlags === undefined) {
+    if (wanted.length && globalThis.__hatchFlags === undefined) {
       // The door's flags arrive after the first frame; the view is drawn again when they do.
       Promise.resolve(flags?.()).then((got) => {
         if (!got || stopped) return;
-        known = got;
+        known = Object.fromEntries(wanted.filter((k) => k in got).map((k) => [k, got[k]]));
         draw();
       }, (e) => fault(e));
     }

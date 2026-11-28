@@ -134,6 +134,7 @@ Deno.test("a bound hatch's stylesheet is linked while it is mounted", async () =
 
 // A module that shows the flag it is given: what the door's flags make of a view.
 const flagged = {
+  flags: ["lobby"],
   init: () => ({}),
   view: (_s: unknown, _r: unknown, ctx: { flags: Record<string, boolean> }) => ({
     tag: "p", key: "flag", attrs: { id: "flag" }, text: ctx.flags.lobby === true ? "on" : "off",
@@ -167,4 +168,23 @@ Deno.test("a hatch stopped before the flags answer is not drawn again", async ()
   answer({ lobby: true });
   await settle();
   assertEquals(screen.querySelector("#hatch-probe"), null);
+});
+
+Deno.test("a module that lists no flags is not given the door's, and the door is not asked", async () => {
+  const { screen } = screenOf();
+  let asked = 0;
+  const stop = bound("probe", binding, { ...flagged, flags: undefined }, { ...quiet(), flags: () => { asked++; return Promise.resolve({ lobby: true }); } })(screen, {});
+  await settle();
+  assertEquals(asked, 0);
+  assertEquals(screen.querySelector("#flag").textContent, "off");
+  stop();
+});
+
+Deno.test("only the flags a module lists reach its ctx", async () => {
+  const { screen } = screenOf();
+  const seen = { ...flagged, view: (_s: unknown, _r: unknown, ctx: { flags: Record<string, boolean> }) => ({ tag: "p", key: "flag", attrs: { id: "flag" }, text: Object.keys(ctx.flags).join(",") }) };
+  const stop = bound("probe", binding, seen, { ...quiet(), flags: () => Promise.resolve({ lobby: true, ads: true }) })(screen, {});
+  await settle();
+  assertEquals(screen.querySelector("#flag").textContent, "lobby");
+  stop();
 });
