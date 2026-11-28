@@ -179,6 +179,13 @@ if verb == "create":
 if verb == "patch":
     if exists("patch_fail") and len(args) > 1 and args[1].startswith("cluster.postgresql"):
         fail("Error from server (Forbidden): patch is forbidden")
+    if len(args) > 1 and args[1].startswith("cluster.postgresql") and exists("live_clusters"):
+        # the admission policy judges the whole object a patch makes (a Deny binding): the live Cluster's postgresUID stays unless the patch sets it, and only 999 is approved
+        name = args[1].split("/")[1]
+        flags = [f for n in read("live_clusters").split() if n.split(";")[0].split("=")[0] == name for f in n.split(";")[1:]]
+        uid = json.loads(opt("-p")).get("spec", {}).get("postgresUID", 26 if "uid26" in flags else 999)
+        if uid != 999:
+            fail(f'Error from server (Forbidden): admission webhook denied the request: a tenant\'s Cluster runs the database as the approved base\'s uid and gid (999), not {uid}')
     if len(args) > 2 and args[1] == "configmap" and args[2] == "pronto-release":
         p = d + "/cm/pronto-release"
         if exists("strict_cm") and not os.path.exists(p):
@@ -378,7 +385,19 @@ if verb == "get":
         # the Clusters already in the namespace (`live_clusters`, names one a line): what a tenant's preflight lists
         if not exists("live_clusters"):
             sys.exit(0)
-        out({"items": [dict({"metadata": {"name": n.split("=")[0]}}, **({"spec": {"superuserSecret": {"name": n.split("=")[1]}}} if "=" in n else {})) for n in read("live_clusters").split()]})
+        # `name[=superuserSecret][;su][;uid26]`: `su` is enableSuperuserAccess true, `uid26` is postgresUID 26 (what CloudNativePG defaults a legacy Cluster to)
+        def live_cluster(n):
+            head, *flags = n.split(";")
+            name, _, secret = head.partition("=")
+            spec = {}
+            if secret:
+                spec["superuserSecret"] = {"name": secret}
+            if "su" in flags:
+                spec["enableSuperuserAccess"] = True
+            if "uid26" in flags:
+                spec["postgresUID"] = 26
+            return dict({"metadata": {"name": name}}, **({"spec": spec} if spec else {}))
+        out({"items": [live_cluster(n) for n in read("live_clusters").split()]})
     if what.startswith("cluster.postgresql.cnpg.io"):
         if exists("read_fail_cluster"):
             fail("Unable to connect to the server: net/http: TLS handshake timeout")

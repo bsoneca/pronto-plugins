@@ -670,7 +670,9 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded. A container that
 	# leaves allowPrivilegeEscalation unset is made to say false first, and what it will retire is the engine's to decide, before any write.
 	let objects = if $tenant { tenant harden-objects $objects } else { $objects }
-	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant live-clusters $node.namespace) (tenant live-superuser-secrets $node.namespace $objects) }
+	# the Clusters the namespace holds, read once: what the check and the migration below both go by
+	let live_clusters = if $tenant { tenant live-cluster-items $node.namespace } else { [] }
+	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant cluster-names $live_clusters) (tenant live-superuser-secrets $live_clusters) (tenant migrating-secrets $live_clusters $objects) }
 	let retire = if $tenant { tenant check-retire $node (tenant retire-kinds) $objects } else { $node.retire }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })
@@ -695,8 +697,12 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# A tenant's render has no Namespace: its provisioner made it.
 	if ($parts.namespace | is-not-empty) { apply-objects $parts.namespace --adopt=$adopt }
 	dry-run $parts.rest $ns --adopt=$adopt --tenant=$tenant
-	# A legacy tenant Cluster that still has the postgres superuser on is taken off it first (PRONTO-2260), so the Secrets this release writes never meet a login
-	if $tenant { for n in (tenant migrate-superuser $ns $objects) { print $"node: (stamp) the database cluster ($n) is off the postgres superuser" } }
+	# A legacy tenant Cluster that still has the postgres superuser on is taken off it first (PRONTO-2260), so the Secrets this release writes never meet a login.
+	# Both live tenant databases (Studio) are such Clusters, and their auth Deployment and initdb and migrate Jobs connect as `postgres` through `<app>-db-postgres` (read on the
+	# node, 2026-11-28): CloudNativePG drops that password once the Cluster is patched, so a release that fails after this point cannot put those pods back, and a tenant's Cluster
+	# may not have the superuser back (the admission policy refuses enableSuperuserAccess: true). The way back is forward: the next Publish rolls out workloads on the app login.
+	let migrated = if $tenant { tenant migrate-superuser $ns $objects $live_clusters } else { [] }
+	for n in $migrated { print $"node: (stamp) the database cluster ($n) is off the postgres superuser" }
 	# What serves is about to change (the server accepted the render): the record of the public site's verification, which cd
 	# trusts, is invalidated before the first write that can change it, so a release that fails halfway can never leave an old
 	# commit marked verified over new images. A first release has no record.
@@ -765,6 +771,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	} catch {|e|
 		print -e $"node: (stamp) the release failed: ($e.msg)"
 		let back = (try { rollback undo $before $ns } catch {|r| {undone: [], failed: [{name: "(all)", why: $r.msg}]} })
+		if ($migrated | is-not-empty) { print -e $"node: (stamp) the database cluster\(s\) ($migrated | str join ', ') stay off the postgres superuser: a Deployment or Job that connects as postgres cannot log in again, publish again to roll out workloads on the app login" }
 		error make {msg: ($e.msg + (if ($back.undone | is-not-empty) { $"; rolled back ($back.undone | str join ', ')" } else { "" }) + (if ($back.failed | is-not-empty) { $"; could not roll back ($back.failed | each {|f| $'($f.name): ($f.why)' } | str join '; ')" } else { "" }))}
 	}
 	# 14. retire what an earlier release left
