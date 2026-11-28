@@ -338,6 +338,14 @@ cases: "a mark of a live workload goes only when the pods read now are the wante
 	]
 }
 
+cases: "a surge rollout (ready and updated as wanted, one old pod still counted in status.replicas) keeps the mark and is no error": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, rollout: {"aprende/Deployment/aprende-flagd": "surge"}}], holds: {code: 0, marked: ["aprende.Deployment.aprende-flagd"], err: ""}, why: "replicas 2, maxSurge 1: readyReplicas 2, updatedReplicas 2, replicas 3"},
+		{pick: ["out"], matches: "still rolling out"},
+	]
+}
+
 cases: "only the pods the workload owns are counted: another workload's, matched by an overlapping selector, is not; more pods than wanted fail the run": {
 	suite: "daprheal"
 	steps: [

@@ -126,7 +126,7 @@ prune_marks() {
     esac
     owner="$kind/$name"
     rc=0
-    out=$(k -n "$ns" get "$owner" -o jsonpath='{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.readyReplicas}|{.status.updatedReplicas}|{.status.desiredNumberScheduled}|{.status.numberReady}|{.status.updatedNumberScheduled}' 2>"$errf") || rc=$?
+    out=$(k -n "$ns" get "$owner" -o jsonpath='{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.readyReplicas}|{.status.updatedReplicas}|{.status.desiredNumberScheduled}|{.status.numberReady}|{.status.updatedNumberScheduled}|{.status.replicas}|{.status.currentNumberScheduled}' 2>"$errf") || rc=$?
     if [ "$rc" -ne 0 ]; then
       if ! grep -q NotFound "$errf"; then
         echo "dapr-heal: $ns/$owner could not be read to confirm it recovered: its mark stays" >&2
@@ -134,10 +134,11 @@ prune_marks() {
         continue
       fi
     else
-      local gen obs want ready upd desired nready updsched
-      IFS='|' read -r gen obs want ready upd desired nready updsched <<<"$out"
-      if [ "$kind" = DaemonSet ]; then want=${desired:-0}; ready=${nready:-0}; upd=${updsched:-0}; fi
-      if [ "${obs:-}" != "${gen:-}" ] || [ "${ready:-0}" != "${want:-0}" ] || [ "${upd:-0}" != "${want:-0}" ]; then
+      local gen obs want ready upd desired nready updsched total cur
+      IFS='|' read -r gen obs want ready upd desired nready updsched total cur <<<"$out"
+      if [ "$kind" = DaemonSet ]; then want=${desired:-0}; ready=${nready:-0}; upd=${updsched:-0}; total=${cur:-0}; fi
+      # status.replicas counts the old pods too: a surge (3 of 2 wanted) is a rollout still going, though ready and updated are as wanted.
+      if [ "${obs:-}" != "${gen:-}" ] || [ "${ready:-0}" != "${want:-0}" ] || [ "${upd:-0}" != "${want:-0}" ] || [ "${total:-0}" != "${want:-0}" ]; then
         echo "dapr-heal: $ns/$owner has no bare pod now but is still rolling out (generation ${gen:-?}, observed ${obs:-?}, ready ${ready:-0} of ${want:-0}): its mark stays"
         continue
       fi
