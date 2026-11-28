@@ -40,6 +40,11 @@ def main [] {
 	test_the_disk_watch_fails_loudly_when_it_cannot_post_or_read
 	test_a_host_that_drops_diskWatch_loses_its_timer_and_files
 	test_critical_workloads_are_checked_and_apply_cannot_set_them
+	test_the_disk_watch_edges_and_failures_never_go_quiet
+	test_the_disk_watch_unit_runs_hardened_and_without_root
+	test_a_file_is_created_with_its_mode_not_widened_then_narrowed
+	test_apply_exits_1_on_critical_drift_after_writing
+	test_the_alarm_rings_before_the_kubelet_evicts
 	print "\nAll node host tests passed."
 }
 
@@ -670,12 +675,14 @@ exit 1
 	r##'#!/bin/bash
 d=$(dirname "$0")/..
 [ -e "$d/curlfail" ] && exit 22
+cat >"$d/cfg"
 echo "$*" >>"$d/posts"
 '## | save --force --raw ($dir | path join bin curl)
 	chmod 755 ($dir | path join bin df) ($dir | path join bin curl)
-	let r = (with-env {PATH: $"($dir | path join bin):/usr/bin:/bin", DISK_WATCH_ENV: $envf, DISK_WATCH_STATE: ($dir | path join state)} { ^/bin/bash ($here | path join disk-watch.sh) ...($extra.args? | default []) | complete })
+	let r = (with-env {PATH: $"($dir | path join bin):/usr/bin:/bin", DISK_WATCH_STATE: ($dir | path join state)} { ^/bin/bash -c 'set -a; . "$1"; shift; exec /bin/bash "$@"' _ $envf ($here | path join disk-watch.sh) ...($extra.args? | default []) | complete })
 	let posts = if ($dir | path join posts | path exists) { open --raw ($dir | path join posts) | lines } else { [] }
-	{code: $r.exit_code, out: ($r.stdout + $r.stderr), posts: $posts}
+	let cfg = if ($dir | path join cfg | path exists) { open --raw ($dir | path join cfg) } else { "" }
+	{code: $r.exit_code, out: ($r.stdout + $r.stderr), posts: $posts, cfg: $cfg}
 }
 
 def test_the_disk_watch_posts_once_a_crossing_and_again_after_the_interval [] {
@@ -686,7 +693,9 @@ def test_the_disk_watch_posts_once_a_crossing_and_again_after_the_interval [] {
 	let a = (run-watch $dir $host (do $at 76))
 	assert equal $a.code 0
 	assert equal ($a.posts | length) 1
-	assert str contains ($a.posts | first) "https://ntfy.example.org/node-x7k2"
+	assert equal $a.cfg "url = \"https://ntfy.example.org/node-x7k2\"\n" "curl reads the URL from its config on stdin"
+	assert (not (($a.posts | first) | str contains "ntfy.example.org")) "the URL is not in curl's arguments, where ps and /proc show it"
+	assert str contains ($a.posts | first) "-K -"
 	assert str contains ($a.posts | first) "/var/lib/containerd is 76% full (alert at 75%)"
 	let b = (run-watch $dir $host (do $at 76))
 	assert equal ($b.posts | length) 1 "once per crossing"
@@ -803,4 +812,84 @@ exit 0
 	# The vet refuses values the schema does not allow, before any ssh or kubectl.
 	let bad = (try { render ((defaults) | merge {critical: {kubectl: "/tmp/evil", workloads: [{namespace: "alerts", kind: "Deployment", name: "a"}]}}); "rendered" } catch {|e| $e.msg })
 	assert str contains $bad "critical is not what #Host allows"
+}
+
+def test_the_disk_watch_edges_and_failures_never_go_quiet [] {
+	print "test exactly the threshold posts, a use that is no number fails the run, the other mounts are still read, and a mark that cannot be written is said..."
+	let host = (with-watch)
+	let dir = (tmp)
+	let at75 = (run-watch $dir $host {"/": "75%" "/var/lib/containerd": "10%" "/var/lib/rancher": "10%"})
+	assert equal ($at75.posts | length) 1 "75% is the line"
+	rm -rf $dir
+	let dir2 = (tmp)
+	let nan = (run-watch $dir2 $host {"/": "-%" "/var/lib/containerd": "76%" "/var/lib/rancher": "10%"})
+	assert equal $nan.code 1 "a use that is not a number fails the run"
+	assert str contains $nan.out "cannot read the use of /"
+	assert equal ($nan.posts | length) 1 "the other mounts are still read and posted"
+	rm -rf $dir2
+	let dir3 = (tmp)
+	mkdir ($dir3 | path join state _.new)
+	let mark = (run-watch $dir3 $host {"/": "76%" "/var/lib/containerd": "10%" "/var/lib/rancher": "10%"})
+	assert equal $mark.code 1
+	assert str contains $mark.out "could not write the mark"
+	rm -rf $dir3
+}
+
+def test_the_disk_watch_unit_runs_hardened_and_without_root [] {
+	print "test the disk watch's service runs as a dynamic user from the env file, with a timeout and no extra rights, after the network is up..."
+	let svc = (render (with-watch) | where path == "/etc/systemd/system/pronto-disk-watch.service" | first | get text)
+	for line in ["After=local-fs.target network-online.target" "Wants=network-online.target" "EnvironmentFile=/etc/pronto/disk-watch.env" "TimeoutStartSec=120" "DynamicUser=yes" "StateDirectory=pronto/disk-watch" "NoNewPrivileges=yes" "ProtectSystem=strict" "ProtectHome=yes" "PrivateTmp=yes" "PrivateDevices=yes" "CapabilityBoundingSet=" "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" "ProtectKernelTunables=yes" "ProtectControlGroups=yes"] {
+		assert ($svc | lines | any {|l| $l == $line }) $"the unit says ($line)"
+	}
+	let script = (open --raw ($here | path join disk-watch.sh))
+	assert (not ($script | str contains ". \"$env\"")) "the script does not source the settings file"
+}
+
+def test_a_file_is_created_with_its_mode_not_widened_then_narrowed [] {
+	print "test the temporary file apply writes has no group or other bits before chmod, so a secret is never readable..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	'#!/bin/bash
+d=$(dirname "$0")/..
+echo "$(stat -f %Lp "$2" 2>/dev/null || stat -c %a "$2")" >>"$d/new-modes"
+exec /bin/chmod "$@"
+' | save --force --raw ($dir | path join bin chmod)
+	/bin/chmod 755 ($dir | path join bin chmod)
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (with-watch) --root $root | ignore
+	}
+	let modes = (open --raw ($dir | path join new-modes) | lines | where {|m| $m != "" })
+	assert (($modes | length) >= 8) "every file went through the temporary"
+	assert ($modes | all {|m| $m =~ '^[0-7]00$' }) $"no group or other bits on a temporary: ($modes)"
+	rm -rf $dir
+}
+
+def test_apply_exits_1_on_critical_drift_after_writing [] {
+	print "test host.nu apply (not --check) exits 1 and says so when a critical workload is not at a system class..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	mkdir ($root + "/usr/local/bin")
+	'#!/bin/bash
+exit 0
+' | save --force --raw ($root + "/usr/local/bin/k3s")
+	/bin/chmod 755 ($root + "/usr/local/bin/k3s")
+	let hostfile = ($dir | path join host.json)
+	((defaults) | merge {critical: {kubectl: "k3s kubectl", workloads: [{namespace: "alerts", kind: "Deployment", name: "alerting"}]}}) | to json | save --force --raw $hostfile
+	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { ^$nu.current-exe ($here | path join host.nu) apply $hostfile --root $root | complete })
+	assert equal $r.exit_code 1
+	assert str contains $r.stderr "critical workload is not at a system critical priority class"
+	assert str contains $r.stdout "alerts/deployment/alerting does not exist"
+	rm -rf $dir
+}
+
+def test_the_alarm_rings_before_the_kubelet_evicts [] {
+	print "test diskWatch's threshold must be under the line the kubelet evicts at..."
+	let kubelet = "{maxPods: 150, evictionHard: {memory: \"100Mi\", nodefs: 10, nodefsInodes: 5, imagefs: 15, imagefsInodes: 5}, evictionMinimumReclaim: {nodefs: \"5Gi\", imagefs: \"5Gi\"}, imageGC: {high: 80, low: 70}}"
+	let w = {|t| $"{kubelet: ($kubelet), diskWatch: {notifyUrl: \"https://a.org/t\", thresholdPercent: ($t)}}" }
+	assert equal (host-with (do $w 84)).host.diskWatch.thresholdPercent 84
+	assert (not (host-with (do $w 85)).ok) "at the imagefs line: the kubelet evicts at 85% used"
+	assert equal (host-with $"{kubelet: ($kubelet), diskWatch: {notifyUrl: \"https://a.org/t\"}}").host.diskWatch.thresholdPercent 75 "the default is under it"
+	assert equal (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", thresholdPercent: 99}}").host.diskWatch.thresholdPercent 99 "without a kubelet there is no line to read"
 }

@@ -2,6 +2,9 @@
 # Written by pronto-plugins' node/host (bin/pronto-node --host), its settings in /etc/pronto/disk-watch.env — do not edit
 # Tells the operator when a filesystem of the node is filling. It runs on the host, so an eviction of every pod, a dead
 # cluster or a down tunnel cannot silence it. With --dry-run it only says what it would post.
+# MOUNTS (space separated), THRESHOLD_PERCENT, RENOTIFY_MINUTES and NOTIFY_URL come from the environment: the unit's EnvironmentFile
+# is the file host.nu writes from #Host's diskWatch (mode 600, read by systemd as root, so this runs as no one). By hand:
+#   systemd-run --pipe --wait -p EnvironmentFile=/etc/pronto/disk-watch.env bash /usr/local/lib/pronto/disk-watch.sh --dry-run
 set -euo pipefail
 dry=0
 case "${1:-}" in
@@ -9,12 +12,9 @@ case "${1:-}" in
   --dry-run) dry=1 ;;
   *) echo "disk-watch: unknown argument $1 (only --dry-run)" >&2; exit 2 ;;
 esac
-env=${DISK_WATCH_ENV:-/etc/pronto/disk-watch.env}
-state=${DISK_WATCH_STATE:-/var/lib/pronto/disk-watch}
-# MOUNTS (space separated), THRESHOLD_PERCENT, RENOTIFY_MINUTES and NOTIFY_URL: host.nu writes them from #Host's diskWatch.
-# shellcheck disable=SC1090
-. "$env"
-: "${MOUNTS:?disk-watch: MOUNTS is not set in $env}" "${THRESHOLD_PERCENT:?}" "${RENOTIFY_MINUTES:?}" "${NOTIFY_URL:?}"
+# The unit's StateDirectory.
+state=${STATE_DIRECTORY:-${DISK_WATCH_STATE:-/var/lib/pronto/disk-watch}}
+: "${MOUNTS:?disk-watch: MOUNTS is not set (set by the unit EnvironmentFile)}" "${THRESHOLD_PERCENT:?}" "${RENOTIFY_MINUTES:?}" "${NOTIFY_URL:?}"
 # A mark is dropped once the use falls this far under the threshold, so a disk hovering at the line is one crossing.
 hysteresis=3
 now=$(date +%s)
@@ -43,12 +43,17 @@ for path in $MOUNTS; do
     if ! [[ $last =~ ^[0-9]+$ ]]; then last=0; fi
     [ $((now - last)) -ge $((RENOTIFY_MINUTES * 60)) ] || continue
   fi
-  msg="$(hostname): $mount is ${use}% full (alert at ${THRESHOLD_PERCENT}%)"
+  msg="$(uname -n): $mount is ${use}% full (alert at ${THRESHOLD_PERCENT}%)"
   if [ "$dry" = 1 ]; then echo "would post: $msg"; continue; fi
+  # The URL is the channel's key: curl reads it from its config on stdin, never from its arguments (ps and /proc show those).
   # The mark is written only once the post succeeded, so a failed post is tried again at the next run.
-  if curl -fsS --max-time 20 -H "Title: node disk" -H "Priority: high" -d "$msg" "$NOTIFY_URL" >/dev/null; then
-    printf '%s\n' "$now" >"$mark.new" && mv -f "$mark.new" "$mark"
+  if printf 'url = "%s"\n' "$NOTIFY_URL" | curl -fsS --max-time 20 -K - -H "Title: node disk" -H "Priority: high" -d "$msg" >/dev/null; then
     echo "disk-watch: posted: $msg"
+    # A mark that cannot be written means the next run posts again; say so, and fail the run.
+    if ! { printf '%s\n' "$now" >"$mark.new" && mv -f "$mark.new" "$mark"; }; then
+      echo "disk-watch: posted, but could not write the mark $mark: the next run posts again" >&2
+      failed=1
+    fi
   else
     echo "disk-watch: could not post: $msg" >&2
     failed=1

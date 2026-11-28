@@ -14,6 +14,10 @@ import "list"
 	diskWatch?: #DiskWatch
 	// Opt-in: a host with no k3s names no workloads.
 	critical?: #Critical
+	// The alarm rings before the kubelet evicts: the kubelet evicts at (100 - evictionHard) percent used.
+	if kubelet != _|_ {
+		diskWatch?: thresholdPercent: <(100 - kubelet.evictionHard.nodefs) & <(100 - kubelet.evictionHard.imagefs)
+	}
 }
 
 // The node's kubelet, set by kubelet.nu (README.md, "The node host"): how full the disk may get before pods

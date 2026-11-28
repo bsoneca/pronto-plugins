@@ -133,8 +133,11 @@ export def render [host: record]: nothing -> list<record> {
 			] | str join "\n"))}
 			{path: $watch_script, mode: "755", text: (lines (open --raw ($here | path join disk-watch.sh)))}
 			{path: $watch_service, mode: "644", text: (lines ([
-				$watch_head "[Unit]" "Description=Post to the operator when a filesystem of the node is filling" "After=local-fs.target" ""
-				"[Service]" "Type=oneshot" $"ExecStart=/bin/bash ($watch_script)" "Nice=19"
+				$watch_head "[Unit]" "Description=Post to the operator when a filesystem of the node is filling" "After=local-fs.target network-online.target" "Wants=network-online.target" ""
+				# Not root: it reads df and posts. The settings come from the manager (EnvironmentFile is read as root), the marks live in StateDirectory.
+				"[Service]" "Type=oneshot" $"EnvironmentFile=($watch_env)" $"ExecStart=/bin/bash ($watch_script)" "Nice=19" "TimeoutStartSec=120"
+				"DynamicUser=yes" "StateDirectory=pronto/disk-watch" "NoNewPrivileges=yes" "ProtectSystem=strict" "ProtectHome=yes" "PrivateTmp=yes" "PrivateDevices=yes"
+				"CapabilityBoundingSet=" "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" "ProtectKernelTunables=yes" "ProtectControlGroups=yes"
 			] | str join "\n"))}
 			{path: $watch_timer, mode: "644", text: (lines ([
 				$watch_head "[Unit]" "Description=Run pronto-disk-watch.service" ""
@@ -206,7 +209,7 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			# Whole beside the file, then renamed over it: a full disk leaves the old file.
 			let dir = ($path | path dirname)
 			let tmp = $"($path).new"
-			must (sh $node $"mkdir -p '($dir)' && rm -f '($tmp)' && cat > '($tmp)' && chmod ($f.mode) '($tmp)' && mv -f '($tmp)' '($path)' || { rm -f '($tmp)'; exit 1; }" $f.text) $"writing ($path)" | ignore
+			must (sh $node $"mkdir -p '($dir)' && rm -f '($tmp)' && \(umask 077 && cat > '($tmp)'\) && chmod ($f.mode) '($tmp)' && mv -f '($tmp)' '($path)' || { rm -f '($tmp)'; exit 1; }" $f.text) $"writing ($path)" | ignore
 			print $"wrote ($path)"
 			$changed = true
 		}
