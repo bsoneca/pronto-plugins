@@ -852,7 +852,7 @@ def test_a_file_is_created_with_its_mode_not_widened_then_narrowed [] {
 	'#!/bin/bash
 d=$(dirname "$0")/..
 echo "$(stat -f %Lp "$2" 2>/dev/null || stat -c %a "$2")" >>"$d/new-modes"
-exec /bin/chmod "$@"
+echo "$(stat -c %a "$2" 2>/dev/null || stat -f %Lp "$2")" >>"$d/new-modes"
 ' | save --force --raw ($dir | path join bin chmod)
 	/bin/chmod 755 ($dir | path join bin chmod)
 	let root = ($dir | path join root)
