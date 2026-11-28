@@ -6,7 +6,7 @@
 //   deno run -A alerts/subscriber.ts uninstall
 // The access token is the `pronto` gcloud configuration's, fetched when needed, fetched again when
 // Pub/Sub answers 401, and held in memory only.
-import { ackRequest, entryOf, expired, isDuplicate, jobEnv, lineOf, ntfyRequest, parseInbox, plist, pullRequest, pushes, rotatedName, subscriptionPath, tailOf } from "./inbox.js";
+import { ackRequest, entryOf, expired, isDuplicate, jobEnv, jobFlags, lineOf, ntfyRequest, parseInbox, plist, pullRequest, pushes, rotatedName, subscriptionPath, tailOf } from "./inbox.js";
 
 export type Subscription = {
   app: string;
@@ -283,7 +283,8 @@ if (import.meta.main) {
     });
     const repo = sh("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], apps[0]);
     const cache = `${home}/.cache/pronto/alerts`;
-    const wt = `${cache}/wt`;
+    // Beside the inbox folder, not in it (jobFlags).
+    const wt = `${home}/.cache/pronto/alerts-code`;
     // Everything that can fail without changing anything comes first: a failed install must not move the code of the job
     // that is running (its worktree), nor its plist.
     // gcloud by its real absolute path, found now: the job's PATH names none, and a mise shim is the mise binary itself,
@@ -313,6 +314,8 @@ if (import.meta.main) {
       if (ntfy) hosts.add(new URL(ntfy.url).host);
     }
     Deno.mkdirSync(cache, { recursive: true });
+    // The worktree an earlier install made inside the inbox folder (alerts/wt) is taken away.
+    if (exists(`${cache}/wt/.git`)) sh("git", ["--git-dir", repo, "worktree", "remove", "-f", `${cache}/wt`]);
     // Where the running job's worktree is now, to put it back if the new job does not load.
     const was = exists(`${wt}/.git`) ? sh("git", ["rev-parse", "HEAD"], wt) : null;
     if (!exists(`${wt}/.git`)) sh("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, "origin/main"]);
@@ -322,15 +325,7 @@ if (import.meta.main) {
     Deno.mkdirSync(logs, { recursive: true });
     Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
     // A fixed bare PATH, and only the permissions the driver uses.
-    const flags = [
-      `--allow-net=${[...hosts].join(",")}`,
-      `--allow-read=${wt},${cache}`,
-      `--allow-write=${cache}`,
-      // The inbox folder holds the worktree: the job writes the inbox, never the code it runs.
-      `--deny-write=${wt}`,
-      `--allow-run=/usr/bin/security,${gcloudAt}`,
-      "--allow-env=HOME,PATH,CLOUDSDK_PYTHON,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
-    ];
+    const flags = jobFlags({ wt, cache, hosts: [...hosts], gcloud: gcloudAt });
     const args = ["run", ...flags, `${wt}/${rels[0]}/alerts/subscriber.ts`, "run", ...rels.map((r) => `${wt}/${r}`)];
     const previous = exists(agent) ? Deno.readTextFileSync(agent) : null;
     Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args, log: `${logs}/alerts-inbox.log`, env }));
