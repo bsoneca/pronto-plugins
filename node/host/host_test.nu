@@ -46,6 +46,7 @@ def main [] {
 	test_apply_exits_1_on_critical_drift_after_writing
 	test_the_alarm_rings_before_the_kubelet_evicts
 	test_the_disk_watch_lows_mounts_the_unit_hides_a_quote_and_a_threshold_past_the_kubelet
+	test_mounts_are_written_plainly_and_a_refused_url_is_never_echoed
 	print "\nAll node host tests passed."
 }
 
@@ -907,4 +908,25 @@ def test_the_disk_watch_lows_mounts_the_unit_hides_a_quote_and_a_threshold_past_
 	assert equal (render $ok | length) 8 "rendering vets both sections: 75% is under the 85% line"
 	let late = (try { render ($ok | merge {diskWatch: ($ok.diskWatch | merge {thresholdPercent: 85})}); "rendered" } catch {|e| $e.msg })
 	assert str contains $late "kubelet and diskWatch are not what #Host allows together"
+}
+
+def test_mounts_are_written_plainly_and_a_refused_url_is_never_echoed [] {
+	print "test a mount with // or a . or .. segment or in a dynamic user's private state is refused, a refused URL is redacted, and vetting leaves no file behind..."
+	for m in ["/var//lib" "/var/./lib" "/var/lib/.." "/a/../tmp" "/." "/var/lib/private" "/var/lib/private/x" "/var/cache/private" "/var/log/private/y"] {
+		assert (not (host-with $"{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: [\"($m)\"]}}").ok) $"($m) is refused"
+	}
+	assert (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: [\"/\", \"/var/lib/rancher\", \"/mnt/.data\", \"/var/lib/privateer\"]}}").ok "dotted names and a name that only starts like private are fine"
+	let before = (glob ((mktemp --directory --tmpdir) | path dirname | path join "node-host-vet-*") | length)
+	let bad = (try { render ((with-watch) | merge {diskWatch: {notifyUrl: "https://secret.example/topic-x7k2\"y", mounts: ["/"], thresholdPercent: 75, renotifyMinutes: 360, onCalendar: "minutely"}}); "rendered" } catch {|e| $e.msg })
+	assert str contains $bad "diskWatch is not what #Host allows"
+	assert (not ($bad | str contains "secret.example")) "cue echoed the URL and it was redacted"
+	assert str contains $bad "<redacted>"
+	# Whatever the value is, and wherever its secret sits in it, cue's Go-quoted echo is redacted whole.
+	for v in ["https://secret.example/TOP\"tail-SECRET" "https://secret.example/a b-SECRET" "http://secret.example/topic-SECRET" "HTTPS://secret.example/topic-SECRET" "secret.example/topic-SECRET" "https://secret.example/q\\back-SECRET"] {
+		let msg = (try { render ((with-watch) | merge {diskWatch: {notifyUrl: $v, mounts: ["/"], thresholdPercent: 75, renotifyMinutes: 360, onCalendar: "minutely"}}); "rendered" } catch {|e| $e.msg })
+		assert str contains $msg "diskWatch is not what #Host allows" $"($v) is refused"
+		assert (not ($msg | str contains "SECRET")) $"nothing of ($v) is shown: ($msg)"
+		assert (not ($msg | str contains "secret.example")) $"the host of ($v) is not shown"
+	}
+	assert equal (glob ((mktemp --directory --tmpdir) | path dirname | path join "node-host-vet-*") | length) $before "no vet temporary"
 }

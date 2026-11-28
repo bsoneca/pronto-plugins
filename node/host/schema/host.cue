@@ -119,9 +119,11 @@ import "list"
 	onCalendar: *"minutely" | (string & =~"^[^\n\r\\\\]+$")
 }
 
-// Not under /home, /root, /run/user, /tmp, /var/tmp or /dev: the unit hides them (ProtectHome, PrivateTmp, PrivateDevices), so df would read the
+// Written plainly: no `//`, no `.` or `..` segment (a path that names another through them would slip the list below). Not under /home, /root,
+// /run/user, /tmp, /var/tmp, /dev, or the private state of a dynamic user (/var/lib/private, /var/cache/private, /var/log/private): the unit hides them
+// (ProtectHome, PrivateTmp, PrivateDevices, DynamicUser), so df would read the
 // unit's own empty view and the alarm would watch the wrong disk.
-#Mount: string & =~"^/[A-Za-z0-9._/-]*$" & !~"^/(home|root|run/user|tmp|var/tmp|dev)(/|$)"
+#Mount: string & =~"^/[A-Za-z0-9._/-]*$" & !~"//" & !~"(^|/)\\.{1,2}(/|$)" & !~"^/(home|root|run/user|tmp|var/tmp|dev|var/lib/private|var/cache/private|var/log/private)(/|$)"
 
 // The workloads that must outlive an eviction (PRONTO-2061): the kubelet evicts the lowest priority first, and a pod with no
 // priority class goes before a system one. host.nu only checks (a class is set by the workload's own manifest, in the repository that
