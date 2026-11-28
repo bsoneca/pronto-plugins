@@ -356,7 +356,9 @@ so a bound every node needs is written here once, with defaults, and each reposi
   A failed post, or a mount df cannot read, fails the run (so `apply --check` reports the job as failed) and is tried again next minute: the
   watcher never goes quiet on an error. `notifyUrl` has no default (a node names its channel) and must be off the node: a channel behind the node's
   own tunnel is down with it. It is a secret (a random topic; anyone holding it can post), so `/etc/pronto/disk-watch.env` is mode 600 and the URL
-  carries no app names. `diskWatch?` is opt-in; a host that drops it has the timer disabled and the four files removed by `apply`. `--dry-run`
+  carries no app names. The unit runs as a dynamic user, not root (settings from `EnvironmentFile=`, read by systemd as root; marks in
+  `StateDirectory=pronto/disk-watch`; no capabilities, `ProtectSystem=strict`, a 120 s timeout), and curl takes the URL from its config on stdin, so
+  it is in no process's arguments. `diskWatch.thresholdPercent` must be under the line the kubelet evicts at when `kubelet` is set. `diskWatch?` is opt-in; a host that drops it has the timer disabled and the four files removed by `apply`. `--dry-run`
   says what it would post.
 - `#Host.critical` (PRONTO-2061): `workloads` (at most 8; `namespace`, `kind` Deployment, StatefulSet or DaemonSet, `name`; not a Studio tenant's
   namespace) that must run under `system-cluster-critical` or `system-node-critical`, so the kubelet evicts everything else first. `host.nu apply`
