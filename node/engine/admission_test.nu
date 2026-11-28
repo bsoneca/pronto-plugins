@@ -32,6 +32,7 @@ def main [--kind: string = ""] {
 	test_services_and_secrets
 	test_an_externalsecret_takes_no_superuser_secret_as_a_template_source
 	test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone
+	test_an_externalsecret_writes_its_own_secret_as_its_owner_and_no_guarded_one
 	test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template
 	test_an_enum_value_is_compared_as_the_engine_compares_it
 	test_a_cluster_is_held_to_the_engines_allow_list
@@ -77,7 +78,7 @@ def test_no_policy_is_named_as_one_of_studios_own [] {
 		assert ($o.metadata.name not-in $studios) $"($o.kind) ($o.metadata.name) is Studio's"
 		assert ($o.metadata.name | str starts-with $"($policy_prefix)-engine-") $o.metadata.name
 	}
-	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 8
+	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 9
 }
 
 # Whether a CEL expression's brackets and quotes are balanced: a string literal ends, and every closer has an opener, none is left open. "" when they are, else what is not.
@@ -134,7 +135,7 @@ def test_every_expression_is_balanced [] {
 def test_every_policy_matches_tenant_namespaces_only [] {
 	print "test every policy matches a namespace with the tenant label and no other..."
 	let all = (policies)
-	assert equal ($all | columns | sort) [clusters externalsecrets objects pods secrets services statefulsets templates]
+	assert equal ($all | columns | sort) [clusters externalsecrets objects passwords pods secrets services statefulsets templates]
 	for name in ($all | columns) {
 		let sel = ($all | get $name).spec.matchConstraints.namespaceSelector.matchExpressions
 		assert equal $sel [{key: $label, operator: "Exists"}] $name
@@ -251,6 +252,53 @@ def test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone [
 	for w in [extract find storeRef remoteRef] { assert (not ($from | str contains $"'($w)'")) $"the dataFrom rule allows ($w): ($from)" }
 }
 
+def test_an_externalsecret_writes_its_own_secret_as_its_owner_and_no_guarded_one [] {
+	print "test an ExternalSecret writes the Secret of its own name as its Owner, none that ends in a guarded suffix, and a database Secret of a generated password alone, each read off #TenantExternalSecret (PRONTO-2147)..."
+	let tes = (schema '#TenantExternalSecret')
+	let own = (one-rule externalsecrets "Secret of its own name")
+	assert ($own | str contains "object.spec.target.name == object.metadata.name") $own
+	for k in $tes.creationPolicies { assert ($own | str contains $"in ['($k)']") $own }
+	let su = (one-rule externalsecrets "no Secret that holds a database's superuser password")
+	assert equal ($tes.superuserSuffixes | length) 1
+	for x in $tes.superuserSuffixes { assert ($su | str contains $"object.metadata.name.endsWith\('($x)'\)") $su }
+	assert (not ($su | str contains $tes.dbSecretSuffix)) $"the superuser rule refuses upstream's own database Secret: ($su)"
+	let db = (one-rule externalsecrets "writes a database Secret")
+	assert ($db | str contains $"endsWith\('($tes.dbSecretSuffix)'\)") $db
+	assert ($db | str contains "!has(object.spec.target.template.templateFrom)") $db
+	for k in $tes.dbSecretKeys { assert ($db | str contains $"'($k)'") $db }
+	assert ($db | str contains $"matches\('($tes.dbSecretPassword)'\)") $db
+	# a plain Secret of a guarded name is the same write by another route
+	let plain = (one-rule secrets "no Secret that holds a database's superuser password")
+	for x in (schema '#TenantGuardedSecretSuffixes') { assert ($plain | str contains $"object.metadata.name.endsWith\('($x)'\)") $plain }
+	# …which the external-secrets controller's own write of `<release>-db-postgres` is not: its account is left out of the policy, as the database operator's is of the Clusters'
+	# …in the guarded-name rule ALONE: no matchCondition leaves the controller out of the others (the token checks below judge its requests, which write a token Secret from a template)
+	let eso = "request.userInfo.username == 'system:serviceaccount:external-secrets:external-secrets' || "
+	assert ($plain | str starts-with $eso) $"the guarded-name rule judges the external-secrets controller: ($plain)"
+	let sec = (policies).secrets.spec
+	assert equal ($sec.matchConditions | get name) [not-a-controller not-the-operator]
+	for r in $sec.validations {
+		if not ($r.message | str contains "superuser password") { assert (not ($r.expression | str contains "external-secrets")) $"a rule that is not the guarded-name one leaves the controller out: ($r.message)" }
+	}
+	assert ($sec.validations | any {|v| ($v.expression | str contains "kubernetes.io/service-account-token") }) "the token type rule is gone"
+	assert ($sec.validations | any {|v| ($v.expression | str contains "kubernetes.io/service-account.") }) "the token annotation rule is gone"
+	let other = (policies ', externalSecretsAccount: "system:serviceaccount:x:y"').secrets.spec.validations.0.expression
+	assert ($other | str starts-with "request.userInfo.username == 'system:serviceaccount:x:y' || ") $"the account is no parameter: ($other)"
+	# the ExternalSecret that makes the controller write one is refused as well: two layers (tenant.nu is the third)
+	let tok = (one-rule externalsecrets "targets no service account token Secret")
+	assert ($tok | str contains $"!= '($tes.tokenType)'") $tok
+	assert ($tok | str contains $"startsWith\('($tes.tokenAnnotationPrefix)'\)") $tok
+	# a tenant's Password generator is upstream's: only its keys, no symbolCharacters, a length of at least passwordMinLength and no symbols
+	let keys = (one-rule passwords "sets only the spec keys")
+	for k in $tes.passwordKeys { assert ($keys | str contains $"'($k)'") $keys }
+	assert (not ($keys | str contains "symbolCharacters")) $keys
+	let len = (one-rule passwords "at least")
+	assert ($len | str contains $"object.spec.length >= ($tes.passwordMinLength)") $len
+	assert ($len | str contains $"object.spec.length <= ($tes.passwordMaxLength)") $len
+	let sym = (one-rule passwords "no symbols")
+	assert ($sym | str contains "object.spec.symbols == 0") $sym
+	assert equal ((policies).passwords.spec.matchConstraints.resourceRules) [{apiGroups: [generators.external-secrets.io], apiVersions: ["*"], operations: [CREATE UPDATE], resources: [passwords]}]
+}
+
 def test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template [] {
 	print "test a pod reads no Secret of #TenantGuardedSecretSuffixes by env, envFrom, a secret volume or a projected one (init and ephemeral containers too), and a StatefulSet has no volumeClaimTemplates..."
 	for policy in [pods templates] {
@@ -361,7 +409,7 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 	let notes = (one-rule clusters "carries no cnpg.io/ annotation")
 	for p in (schema '#TenantRefusedClusterAnnotationPrefixes') { assert ($notes | str contains $"k.startsWith\('($p)'\)") $p }
 	let bindings = (schema '(#TenantAdmission & {label: "x/y"}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
-	assert equal ($bindings | length) 8
+	assert equal ($bindings | length) 9
 	for b in $bindings { assert equal $b.spec.validationActions [Warn Audit] }
 	let deny = (schema '(#TenantAdmission & {label: "x/y", actions: ["Deny", "Audit"]}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
 	for b in $deny { assert equal $b.spec.validationActions [Deny Audit] }

@@ -127,6 +127,19 @@ cases: {
 			_want: c.says
 		}
 	}
+	// PRONTO-2147: a tenant's Password generator
+	for n, c in _tenantES.generators.allowed {
+		"a tenant's Password generator that \(n) is refused for nothing": {
+			_got:  (_tenantRefuse & {extra: [c.object]}).violations
+			_want: c.says
+		}
+	}
+	for n, c in _tenantES.generators.refused {
+		"a tenant's Password generator that \(n) is refused": {
+			_got:  (_tenantRefuse & {extra: [c.object]}).violations
+			_want: c.says
+		}
+	}
 	for n, c in _tenantES.refused {
 		"a tenant's ExternalSecret that \(n) is refused": {
 			_got:  (_tenantRefuse & {extra: [c.object]}).violations
