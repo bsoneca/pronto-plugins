@@ -3307,6 +3307,19 @@ def test_a_tenants_externalsecret_reads_no_store [] {
 		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: app} ($kinds)")
 		assert equal $r.exit_code 0 $"an ExternalSecret that ($name) was refused: ($r.stderr)"
 	}
+	# PRONTO-2147: a tenant's Password generator, upstream's shape only
+	let gkinds = "[generators.external-secrets.io/v1alpha1/Password]"
+	for name in ($cases.generators.refused | columns) {
+		let c = ($cases.generators.refused | get $name)
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: app} ($gkinds)")
+		assert ($r.exit_code != 0) $"a Password generator that ($name) was not refused"
+		for says in $c.says { assert (has $r.stderr $says) $"($name): ($says) is not in ($r.stderr)" }
+	}
+	for name in ($cases.generators.allowed | columns) {
+		let c = ($cases.generators.allowed | get $name)
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: app} ($gkinds)")
+		assert equal $r.exit_code 0 $"a Password generator that ($name) was refused: ($r.stderr)"
+	}
 	# PRONTO-2147: a legacy Cluster's superuserSecret is a name only a live read gives (live_secrets): an ExternalSecret of that name is refused, as its own Owner too
 	let legacy = '{apiVersion: external-secrets.io/v1beta1, kind: ExternalSecret, metadata: {name: legacy-su, namespace: ns}, spec: {target: {creationPolicy: Owner}}}'
 	let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($legacy)] {namespace: ns, name: app} ($kinds) [] [legacy-su]")

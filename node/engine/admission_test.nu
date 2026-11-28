@@ -78,7 +78,7 @@ def test_no_policy_is_named_as_one_of_studios_own [] {
 		assert ($o.metadata.name not-in $studios) $"($o.kind) ($o.metadata.name) is Studio's"
 		assert ($o.metadata.name | str starts-with $"($policy_prefix)-engine-") $o.metadata.name
 	}
-	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 8
+	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 9
 }
 
 # Whether a CEL expression's brackets and quotes are balanced: a string literal ends, and every closer has an opener, none is left open. "" when they are, else what is not.
@@ -135,7 +135,7 @@ def test_every_expression_is_balanced [] {
 def test_every_policy_matches_tenant_namespaces_only [] {
 	print "test every policy matches a namespace with the tenant label and no other..."
 	let all = (policies)
-	assert equal ($all | columns | sort) [clusters externalsecrets objects pods secrets services statefulsets templates]
+	assert equal ($all | columns | sort) [clusters externalsecrets objects passwords pods secrets services statefulsets templates]
 	for name in ($all | columns) {
 		let sel = ($all | get $name).spec.matchConstraints.namespaceSelector.matchExpressions
 		assert equal $sel [{key: $label, operator: "Exists"}] $name
@@ -270,6 +270,20 @@ def test_an_externalsecret_writes_its_own_secret_as_its_owner_and_no_guarded_one
 	# a plain Secret of a guarded name is the same write by another route
 	let plain = (one-rule secrets "no Secret that holds a database's superuser password")
 	for x in (schema '#TenantGuardedSecretSuffixes') { assert ($plain | str contains $"object.metadata.name.endsWith\('($x)'\)") $plain }
+	# …which the external-secrets controller's own write of `<release>-db-postgres` is not: its account is left out of the policy, as the database operator's is of the Clusters'
+	let conds = ((policies).secrets.spec.matchConditions | get expression)
+	assert ($conds | any {|e| $e == "request.userInfo.username != 'system:serviceaccount:external-secrets:external-secrets'" }) $"the secrets policy judges the external-secrets controller: ($conds)"
+	let other = ((policies ", externalSecretsAccount: \"system:serviceaccount:x:y\"").secrets.spec.matchConditions | get expression)
+	assert ($other | any {|e| $e == "request.userInfo.username != 'system:serviceaccount:x:y'" }) $"the account is no parameter: ($other)"
+	# a tenant's Password generator is upstream's: only its keys, no symbolCharacters, a length of at least passwordMinLength and no symbols
+	let keys = (one-rule passwords "sets only the spec keys")
+	for k in $tes.passwordKeys { assert ($keys | str contains $"'($k)'") $keys }
+	assert (not ($keys | str contains "symbolCharacters")) $keys
+	let len = (one-rule passwords "at least")
+	assert ($len | str contains $"object.spec.length >= ($tes.passwordMinLength)") $len
+	let sym = (one-rule passwords "no symbols")
+	assert ($sym | str contains "object.spec.symbols == 0") $sym
+	assert equal ((policies).passwords.spec.matchConstraints.resourceRules) [{apiGroups: [generators.external-secrets.io], apiVersions: ["*"], operations: [CREATE UPDATE], resources: [passwords]}]
 }
 
 def test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template [] {
@@ -370,7 +384,8 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 	let all = (policies ', operators: ["system:serviceaccount:cnpg-system:cnpg-manager"]')
 	for p in [pods templates objects services secrets] {
 		let conditions = ($all | get $p).spec.matchConditions
-		assert equal ($conditions | get name) [not-a-controller not-the-operator]
+		# the Secrets' also leaves out the external-secrets controller (PRONTO-2147)
+		assert equal ($conditions | get name) (if $p == secrets { [not-a-controller not-the-operator not-external-secrets] } else { [not-a-controller not-the-operator] })
 		assert ($conditions.0.expression | str contains "system:serviceaccount:kube-system:replicaset-controller") $p
 		assert (not ($conditions.0.expression | str contains "kube-system:*")) "no wildcard of kube-system"
 		assert ($conditions.1.expression | str contains "system:serviceaccount:cnpg-system:cnpg-manager") $p
@@ -382,7 +397,7 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 	let notes = (one-rule clusters "carries no cnpg.io/ annotation")
 	for p in (schema '#TenantRefusedClusterAnnotationPrefixes') { assert ($notes | str contains $"k.startsWith\('($p)'\)") $p }
 	let bindings = (schema '(#TenantAdmission & {label: "x/y"}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
-	assert equal ($bindings | length) 8
+	assert equal ($bindings | length) 9
 	for b in $bindings { assert equal $b.spec.validationActions [Warn Audit] }
 	let deny = (schema '(#TenantAdmission & {label: "x/y", actions: ["Deny", "Audit"]}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
 	for b in $deny { assert equal $b.spec.validationActions [Deny Audit] }

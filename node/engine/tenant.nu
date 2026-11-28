@@ -740,6 +740,17 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 				if $pw != null and not (($pw | into string) =~ $tes.dbSecretPassword) { $why = ($why | append $"($id) sets a database Secret's password that is no reference to a generated key, but a value of its own \(#TenantExternalSecret\)") }
 			}
 		}
+		# a Password generator is upstream's (#TenantExternalSecret.passwordKeys): else the `-db-postgres` password it feeds is a value the tenant chose (symbolCharacters, a short length)
+		if ($o.kind? | default "") == "Password" {
+			let pspec = ($o.spec? | default {})
+			for k in (try { $pspec | columns } catch { [] }) {
+				if $k not-in $tes.passwordKeys { $why = ($why | append $"($id) sets spec.($k), which a tenant's generator may not \(#TenantExternalSecret.passwordKeys\)") }
+			}
+			let plen = ($pspec | get -o length)
+			if $plen != null and $plen < $tes.passwordMinLength { $why = ($why | append $"($id) sets spec.length below ($tes.passwordMinLength) \(#TenantExternalSecret.passwordMinLength\)") }
+			let psym = ($pspec | get -o symbols)
+			if $psym != null and $psym != 0 { $why = ($why | append $"($id) sets spec.symbols, which a tenant's generator has none of \(#TenantExternalSecret\)") }
+		}
 		# a plain Secret of a guarded name is the same write by another route
 		if ($o.kind? | default "") == "Secret" {
 			let n = ($o.metadata?.name? | default "")

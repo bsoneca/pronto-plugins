@@ -16,8 +16,30 @@ package externalsecret
 	crd?: string
 }
 
+// A tenant's Password generator (PRONTO-2147, #TenantExternalSecret.passwordKeys), held the same ways as an ExternalSecret.
+#GeneratorCase: {
+	ns:   string
+	name: string
+	object: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", metadata: {"name": name, namespace: ns}, spec: {...}}
+	says: [...string]
+}
+
 #Cases: {
 	ns: string
+	generators: {
+		allowed: [string]: #GeneratorCase & {"ns": ns, name: *"gen" | string, says: []}
+		refused: [string]: #GeneratorCase & {"ns": ns, name: *"gen" | string, says: [_, ...]}
+		// upstream's: what the engine's logins and `<app>-db-postgres` draw from
+		allowed: "is upstream's": object: spec: {length: 32, digits: 8, symbols: 0, noUpper: false, allowRepeat: true}
+		// the value is then aaaa…: the tenant chose the database superuser's password
+		refused: "yields a value of the tenant's choosing": object: spec: {length: 32, digits: 0, symbols: 32, symbolCharacters: "a", allowRepeat: true}
+		refused: "yields a value of the tenant's choosing": says: [
+			"Password/gen sets spec.symbolCharacters, which a tenant's generator may not (#TenantExternalSecret.passwordKeys)",
+			"Password/gen sets spec.symbols, which a tenant's generator has none of (#TenantExternalSecret)",
+		]
+		refused: "is short": object: spec: {length: 8}
+		refused: "is short": says: ["Password/gen sets spec.length below 24 (#TenantExternalSecret.passwordMinLength)"]
+	}
 	allowed: [string]:   #Case
 	refused: [string]:   #Case
 	allowed: [K=string]: {"ns": ns, name: *"ok" | string, says: []}
