@@ -920,6 +920,13 @@ def test_mounts_are_written_plainly_and_a_refused_url_is_never_echoed [] {
 	let bad = (try { render ((with-watch) | merge {diskWatch: {notifyUrl: "https://secret.example/topic-x7k2\"y", mounts: ["/"], thresholdPercent: 75, renotifyMinutes: 360, onCalendar: "minutely"}}); "rendered" } catch {|e| $e.msg })
 	assert str contains $bad "diskWatch is not what #Host allows"
 	assert (not ($bad | str contains "secret.example")) "cue echoed the URL and it was redacted"
-	assert str contains $bad "https://<redacted>"
+	assert str contains $bad "<redacted>"
+	# Whatever the value is, and wherever its secret sits in it, cue's Go-quoted echo is redacted whole.
+	for v in ["https://secret.example/TOP\"tail-SECRET" "https://secret.example/a b-SECRET" "http://secret.example/topic-SECRET" "HTTPS://secret.example/topic-SECRET" "secret.example/topic-SECRET" "https://secret.example/q\\back-SECRET"] {
+		let msg = (try { render ((with-watch) | merge {diskWatch: {notifyUrl: $v, mounts: ["/"], thresholdPercent: 75, renotifyMinutes: 360, onCalendar: "minutely"}}); "rendered" } catch {|e| $e.msg })
+		assert str contains $msg "diskWatch is not what #Host allows" $"($v) is refused"
+		assert (not ($msg | str contains "SECRET")) $"nothing of ($v) is shown: ($msg)"
+		assert (not ($msg | str contains "secret.example")) $"the host of ($v) is not shown"
+	}
 	assert equal (glob ((mktemp --directory --tmpdir) | path dirname | path join "node-host-vet-*") | length) $before "no vet temporary"
 }

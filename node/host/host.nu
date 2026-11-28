@@ -27,7 +27,7 @@ const heal_timer = "/etc/systemd/system/pronto-dapr-heal.timer"
 const heal_unit = "pronto-dapr-heal.timer"
 const heal_service_unit = "pronto-dapr-heal.service"
 
-const critical_note = "not set by apply"
+export const critical_note = "not set by apply"
 
 const watch_script = "/usr/local/lib/pronto/disk-watch.sh"
 const watch_env = "/etc/pronto/disk-watch.env"
@@ -57,13 +57,13 @@ def lines [text: string]: nothing -> string { ($text | str trim --right --char "
 # json must not carry a quote or a newline into them. Only the section this module sets is vetted (a repository's host
 # holds others of its own); the schema is the one beside this file.
 # `value` vetted against the schema's `def`, as JSON on cue's standard input: no temporary file, so an interrupt leaves none (a section
-# holds the channel's URL, which is its key). Returns the error text, URLs redacted (cue echoes a value it refuses), or "" when it holds.
+# holds the channel's URL, which is its key). Returns the error text, every quoted literal redacted (cue echoes a value it refuses, in Go quotes, whatever the scheme or the text after a quote), or "" when it holds.
 def vet-section [value: any, def: string]: nothing -> string {
 	let r = (try { $value | to json | do { ^cue vet -c ($here | path join schema host.cue) json: - -d $def } | complete } catch {
 		error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
 	})
 	if $r.exit_code == 0 { return "" }
-	$r.stderr | str trim | str replace --all --regex 'https://[^"\s]*' "https://<redacted>"
+	$r.stderr | str trim | str replace --all --regex '"(?:[^"\\]|\\.)*"' '"<redacted>"'
 }
 
 export def vet [host: record] {
