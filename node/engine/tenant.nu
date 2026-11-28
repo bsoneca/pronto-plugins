@@ -657,6 +657,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 	let guarded_secrets = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|c| [($c.spec?.superuserSecret?.name? | default "")] } | flatten | append ($clusters | each {|c| $"($c)-superuser" }) | append $live_secrets | where {|n| $n != "" } | uniq)
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
+		# an ExternalSecret whose spec is no object is refused, and read as an empty one by the checks below (a string has no cell paths)
+		let bad_spec = (($o.kind? | default "") == "ExternalSecret" and (($o.spec? | default {} | describe) !~ '^record'))
+		let o = if $bad_spec { $o | upsert spec {} } else { $o }
 		mut why = []
 		# a name kubectl is handed (rollback reads the Deployments' revisions by it) is a resource name, never an option
 		if not (($o.metadata?.name? | default "" | into string) =~ '^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$') { $why = ($why | append $"($id) is not named as a Kubernetes resource is") }
@@ -679,14 +682,19 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 		# schema's violations and the -engine-externalsecrets admission policy hold)
 		if ($o.kind? | default "") == "ExternalSecret" {
 			let es = ($o.spec? | default {})
+			if $bad_spec { $why = ($why | append $"($id) has a spec that is no object \(#TenantExternalSecret\)") }
 			for k in $tes.noStore {
 				if ($es | get -o $k) != null { $why = ($why | append $"($id) sets spec.($k), which names a store: a tenant's ExternalSecret reads none \(#TenantExternalSecret\)") }
+			}
+			for k in (try { $es | columns } catch { [] }) {
+				if $k not-in $tes.spec and $k not-in $tes.noStore { $why = ($why | append $"($id) sets spec.($k), which a tenant's ExternalSecret may not \(#TenantExternalSecret\)") }
 			}
 			for k in $tes.emptyLists {
 				if ($es | get -o $k | default [] | is-not-empty) { $why = ($why | append $"($id) sets spec.($k), a lookup in a store: a tenant's ExternalSecret reads none \(#TenantExternalSecret\)") }
 			}
 			for row in ($es | get -o dataFrom | default [] | enumerate) {
 				let e = $row.item
+				if ($e | describe) !~ '^record' { $why = ($why | append $"($id) spec.dataFrom[($row.index)] is no object \(#TenantExternalSecret\)"); continue }
 				let at = $"($id) spec.dataFrom[($row.index)]"
 				for k in (try { $e | columns } catch { [] }) {
 					if $k not-in $tes.dataFrom { $why = ($why | append $"($at) sets ($k), which a tenant's ExternalSecret may not \(#TenantExternalSecret\)") }
