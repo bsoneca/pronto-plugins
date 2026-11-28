@@ -314,8 +314,6 @@ if (import.meta.main) {
       if (ntfy) hosts.add(new URL(ntfy.url).host);
     }
     Deno.mkdirSync(cache, { recursive: true });
-    // The worktree an earlier install made inside the inbox folder (alerts/wt) is taken away.
-    if (exists(`${cache}/wt/.git`)) sh("git", ["--git-dir", repo, "worktree", "remove", "-f", `${cache}/wt`]);
     // Where the running job's worktree is now, to put it back if the new job does not load.
     const was = exists(`${wt}/.git`) ? sh("git", ["rev-parse", "HEAD"], wt) : null;
     if (!exists(`${wt}/.git`)) sh("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, "origin/main"]);
@@ -352,6 +350,15 @@ if (import.meta.main) {
       }
       Deno.removeSync(agent);
       throw new Error(`${label} did not load; nothing is installed`);
+    }
+    // The worktree an earlier install made inside the inbox folder (alerts/wt) is taken away only now, with the new job loaded: a
+    // rollback above would have brought back a plist that runs it. If git will not (locked, or another clone's), it is said and left.
+    if (exists(`${cache}/wt/.git`)) {
+      try {
+        sh("git", ["--git-dir", repo, "worktree", "remove", "-f", `${cache}/wt`]);
+      } catch (e) {
+        console.log(`${label}: the old worktree ${cache}/wt stays (${tailOf(String(e))}); remove it by hand: git --git-dir ${repo} worktree remove -f -f ${cache}/wt`);
+      }
     }
     console.log(`${label}: reading ${apps.length} subscription(s) from ${wt} (origin/main ${sh("git", ["rev-parse", "--short", "HEAD"], wt)}), log ${logs}/alerts-inbox.log`);
   } else {
