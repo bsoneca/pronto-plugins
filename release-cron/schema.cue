@@ -165,17 +165,20 @@ releaseCron: #Cron
 	origin!:  string & =~"^https://"
 	// A release preview (rc) proven before the release: `up` releases it (the node's release@k8s --preview=rc), `reach`
 	// makes it answer at `origin` for as long as it runs (a port-forward, killed when the check is done), `down`
-	// removes it, always. A preview whose `origin` is a long-lived https address (scheme, host, optional port: no
-	// userinfo, path, query or fragment) is already reachable, so it has no `reach` and the probes go straight to it;
-	// a localhost origin (the default) is reachable only through `reach`, which it requires. The probes below that do not say `preview: false` are asked of it, and it must answer them
+	// removes it, always. The probes below that do not say `preview: false` are asked of it, and it must answer them
 	// all before the release goes ahead: its images, migrations and config proven on the node, before traffic moves.
+	// `origin` is `http://localhost:<port>` (the default), which answers only through `reach`, so `reach` is required;
+	// or a long-lived https origin, already reachable, which has no `reach`: scheme, host and optional port, with no
+	// userinfo, path, query or fragment, and no loopback host (localhost, 127.0.0.0/8: those need `reach`).
 	preview?: {
 		up!:    [string, ...string]
 		reach?: [string, ...string]
 		down!:  [string, ...string]
-		origin: *"http://localhost:18080" | (string & =~"^http://localhost:[0-9]+$") | (string & =~"^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?$")
+		origin: *"http://localhost:18080" | (string & =~"^http://localhost:[0-9]+$") | (string & =~_httpsOrigin & !~_loopbackHttps)
 		// A localhost origin answers only through a forward: refused without one, whatever the check is run with.
 		_reachOfLocalhost: [if origin =~ "^http://localhost:[0-9]+$" && reach == _|_ {_|_}, true][0]
+		_httpsOrigin:   "^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]{1,5})?$"
+		_loopbackHttps: "(?i)^https://(([^:/]*\\.)?localhost|127(\\.[0-9]+){3})(:|$)"
 		// When the preview runs in a run. "after" (the default): once the rehearsal and the android step passed, as before.
 		// "first": before the rehearsal takes its slot, so a preview that fails costs no rehearsal. "beside": at the same
 		// time as the rehearsal, the first to fail stopping the other (README, "When the preview runs").

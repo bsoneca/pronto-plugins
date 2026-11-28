@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, flakeNotices, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait, previewPortAddresses, previewPortHeld } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, flakeNotices, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait, previewPortAddresses, previewRun } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -876,87 +876,39 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
 }
 async function previewBody(pv: NonNullable<Command["preview"]>, dir: string, cancel: { stopped: boolean }, out: { downCode: number | null }): Promise<string[]> {
   const env = { ...Deno.env.toObject(), STACK_PRIORITY: "release" };
-  const bad: string[] = [];
-  let reach: Deno.ChildProcess | undefined;
   previews++;
-  // A signal ends the preview as `cancel` does: its `down` still runs, and the run's lock waits for it.
-  const stopped = () => cancel.stopped || interrupted;
+  const reachOf = (cmd: string[]) => {
+    const proc = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...cmd], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
+    return { status: proc.status, stop: async () => { send(proc.pid, "TERM"); await proc.stdin.close().catch(() => {}); } };
+  };
   try {
-    const up = await child(pv.up[0], pv.up.slice(1), dir, env, undefined, "preview");
-    if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
-    else if (!stopped() && pv.reach) {
-      // The port is the forward's alone (cron.js previewPortAddresses): what answers there now is someone else's listener, which the
-      // probes would ask in the preview's place. A listener still closing (the kill rehearsal's own forward on the same port) is given
-      // 30 s to go; one that stays fails the preview, naming what it answered. Only a refused connection is a free address.
-      let held: string[] = [];
-      for (let waited = 0; !stopped(); waited += 2) {
-        held = [];
+    const { bad, downCode } = await previewRun(pv, {
+      // A signal ends the preview as `cancel` does: its `down` still runs, and the run's lock waits for it.
+      up: () => child(pv.up[0], pv.up.slice(1), dir, env, undefined, "preview"),
+      down: () => child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down"),
+      heldOnce: async () => {
+        const held: string[] = [];
         for (const a of previewPortAddresses(pv.origin)) {
           try { const r = await fetch(`${a}/`, { signal: AbortSignal.timeout(5_000) }); await r.body?.cancel(); held.push(`${a}: ${r.status}`); }
           catch (e) { if ((e as Error).name === "TimeoutError") held.push(`${a}: no answer in 5 s`); }
         }
-        if (held.length === 0 || waited >= 30) break;
-        await new Promise((r) => setTimeout(r, 2_000));
-      }
-      // Stopped while waiting: the stop is the run's cause, not the port.
-      if (stopped()) held = [];
-      const why = previewPortHeld(pv.origin, held);
-      if (why) bad.push(why);
-    }
-    if (up.code === 0 && !bad.length && !stopped()) {
-      // No `reach` (a long-lived https origin): nothing to start or wait for, the probes ask the origin itself.
-      // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
-      // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
-      const fwd = pv.reach;
-      if (fwd) reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...fwd], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
-      // Answering through the forward: `/` is asked until it answers (the forward takes a moment, as a cold pod's first page does).
-      // A forward that exits first (the ssh dropped, the remote port-forward ended) fails the preview: waiting on would hold
-      // the app's release lock for ever.
-      let gone: Deno.CommandStatus | undefined;
-      reach?.status.then((s) => { gone = s; });
-      let said2 = 0;
-      for (; fwd;) {
-        if (stopped()) break;
-        try { const r = await fetch(pv.origin + "/", { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); if (r.status < 500) break; } catch { /* not up yet */ }
-        if (gone) { bad.push(`the preview's forward (${fwd!.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
-        if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
-        await new Promise((r) => setTimeout(r, 5_000));
-      }
-      // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
-      // that other listener, not the preview.
-      if (!bad.length && fwd && gone) bad.push(`the preview's forward (${fwd!.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
-      if (!bad.length) for (const [name, p] of previewProbes(cron.probes)) {
-        if (stopped()) break;
-        try {
-          const r = await fetch(`${pv.origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
-          const v = probe(p, r.status, await r.text(), r.headers.get("location"));
-          if (v) bad.push(`${name} ${v}`);
-        } catch (e) { bad.push(`${name} ${p.path}: ${(e as Error).message}`); }
-      }
-    }
-    // Stopped by a signal before its checks ran: no pass to read (a race loser's cancel is no failure).
-    if (interrupted && !bad.length) bad.push(causes.signal);
-  } finally {
-    if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
-    let down: { code: number };
-    // `down` is idempotent (a preview already gone is removed), so a failure, most often ssh's own 255 when the connection to the node dropped
-    // ("Read from remote host: Operation timed out", the 2026-11-22 02:09 run, which had passed its kill rehearsal), is tried again after a pause:
-    // 15 s, 30 s, 60 s. A preview still standing after the last try fails the run, as ever.
-    try {
-      down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down");
-      for (const wait of [15, 30, 60]) {
-        if (down.code === 0) break;
-        say(`preview: removing the preview failed (exit ${down.code}); again in ${wait} s`);
-        await new Promise((r) => setTimeout(r, wait * 1000));
-        down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down");
-      }
-    } finally { previews--; }
-    out.downCode = down.code;
-    // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
-    // removes them, which a run that reads as released would hide.
-    if (down.code !== 0) { const m = `removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`; bad.push(m); say(`preview: ${m}`); }
-  }
-  return bad;
+        return held;
+      },
+      startReach: reachOf,
+      ask: async (path: string, spec: { agent?: string; location?: string } | null) => {
+        if (!spec) { const r = await fetch(pv.origin + path, { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); return { status: r.status, body: "", location: null }; }
+        const r = await fetch(`${pv.origin}${path}`, { headers: spec.agent ? { "User-Agent": spec.agent } : {}, redirect: spec.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
+        return { status: r.status, body: await r.text(), location: r.headers.get("location") };
+      },
+      sleep: (ms: number) => new Promise((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+      say,
+      stopped: () => cancel.stopped || interrupted,
+      interrupted: () => interrupted,
+    }, previewProbes(cron.probes), causes.signal);
+    out.downCode = downCode;
+    return bad;
+  } finally { previews--; }
 }
 const sayPreview = (bad: string[]) => say(bad.length ? `preview failed: ${bad.join("; ")}` : "preview answered every probe");
 

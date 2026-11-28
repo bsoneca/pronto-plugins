@@ -8,7 +8,7 @@
 // text: the lock renamed away turns out to hold that pid, as when another run replaced it). The result is the outcome, or the thrown message, the
 // lock's pid file (read through a link) and kind as they end, `linkedWhole` (every symlink onto the lock pointed at a directory already holding a
 // pid) and `madeLockDir` (the lock itself was ever made empty, with mkdir).
-import { lockAcquire, lockRelease, aliveFromKill, previewRecordStop, previewRecorded, previewRecord } from '../../release-cron/cron.js';
+import { lockAcquire, lockRelease, aliveFromKill, previewRecordStop, previewRecorded, previewRecord, previewRun, previewProbes, previewAnswerWait } from '../../release-cron/cron.js';
 
 const err = (code, msg) => Object.assign(new Error(`${code}: ${msg}`), { code });
 const dirOf = (p) => p.slice(0, p.lastIndexOf('/'));
@@ -126,4 +126,35 @@ export async function previewCycle(c = {}) {
   let next = null;
   if (rec) next = previewRecordStop(null, rec.text, path);
   return { order, recordedBeforeUp, record: rec ? 'kept' : 'removed', threw, next, stray: [...f.nodes.keys()].some((k) => k.endsWith('.tmp')) };
+}
+
+// The release preview's checks (cron.js previewRun) on a stand-in for the driver's effects, in a virtual clock: `pv` the preview (`reach` set or
+// not, `origin`), `answers` what the origin says per path, in turn (the last repeats; a number is a status, "down" a refusal to connect),
+// `probes` the [name, spec] list, `upCode`/`downCode` the commands' exits. `events` is what happened in sequence (a repeat is `x<n>`): "up", "held" (the port
+// checked), "reach" (a forward started), "ask <path>", "reach stop", "down"; `bad` what failed; `waited` the virtual seconds the run took.
+export async function previewDrive(c = {}) {
+  const { origin = 'https://rc.example', reach = null, answers = {}, probes = [['home', { path: '/' }], ['player', { path: '/player/1', has: ['rc'] }]], upCode = 0, downCodes = [0] } = c;
+  const pv = { up: ['mise', 'run', 'up'], down: ['mise', 'run', 'down'], origin, ...(reach ? { reach } : {}) };
+  const events = [];
+  const turns = {};
+  const downs = [...downCodes];
+  let t = 0;
+  const io = {
+    up: () => { events.push('up'); return Promise.resolve({ code: upCode }); },
+    down: () => { events.push('down'); return Promise.resolve({ code: downs.length > 1 ? downs.shift() : downs[0] }); },
+    heldOnce: () => { events.push('held'); return Promise.resolve([]); },
+    startReach: () => { events.push('reach'); return { status: new Promise(() => {}), stop: () => { events.push('reach stop'); return Promise.resolve(); } }; },
+    ask: (path) => {
+      events.push(`ask ${path}`);
+      const list = answers[path] ?? [200];
+      const a = list[Math.min(turns[path] = (turns[path] ?? -1) + 1, list.length - 1)];
+      if (a === 'down') return Promise.reject(new Error('connection refused'));
+      return Promise.resolve({ status: a, body: path === '/' ? '' : 'rc', location: null });
+    },
+    sleep: (ms) => { t += ms; return Promise.resolve(); },
+    now: () => t, say: () => {}, stopped: () => false, interrupted: () => false,
+  };
+  const { bad, downCode } = await previewRun(pv, io, previewProbes(Object.fromEntries(probes)), 'stopped by a signal');
+  const runs = events.reduce((a, e) => (a.at(-1)?.[0] === e ? a.at(-1)[1]++ : a.push([e, 1]), a), []).map(([e, n]) => (n > 1 ? `${e} x${n}` : e));
+  return { events: runs, bad, downCode, waited: Math.round(t / 1000), deadline: previewAnswerWait / 1000 };
 }

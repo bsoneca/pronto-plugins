@@ -836,6 +836,94 @@ export const previewRecorded = async (io, path, text, body) => {
   return out;
 };
 
+// How long a preview with no forward is waited for to answer `/` below 500 before the probes: `up` (the node's release@k8s
+// --preview=rc) can return while the rollout is still going, and a long-lived origin may still serve the previous rc.
+export const previewAnswerWait = 10 * 60_000;
+
+// The release preview's checks under `io` (the driver's effects, so the cases hold the order): `up`, the port check and the
+// forward (only with `pv.reach`), the wait for `/`, the probes, and always `down`. Returns `{ bad, downCode }`.
+// io: up() and down() -> {code}; heldOnce() -> the addresses that answer on the preview's port now; startReach(cmd) -> {status:
+// Promise<{code}>, stop()}; ask(path, spec) -> {status, body, location} (spec null for `/`), throwing when nothing answers; sleep(ms),
+// now(), say(text), stopped(); `probes` the [name, spec] list the preview is asked; `signal` the reason a signal gives.
+export const previewRun = async (pv, io, probes, signal) => {
+  const bad = [];
+  let reach;
+  let downCode = null;
+  try {
+    const up = await io.up();
+    if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
+    else if (!io.stopped() && pv.reach) {
+      // The port is the forward's alone (previewPortAddresses): what answers there now is someone else's listener, which the
+      // probes would ask in the preview's place. A listener still closing (the kill rehearsal's own forward on the same port) is given
+      // 30 s to go; one that stays fails the preview, naming what it answered. Only a refused connection is a free address.
+      let held = [];
+      for (let waited = 0; !io.stopped(); waited += 2) {
+        held = await io.heldOnce();
+        if (held.length === 0 || waited >= 30) break;
+        await io.sleep(2_000);
+      }
+      // Stopped while waiting: the stop is the run's cause, not the port.
+      if (io.stopped()) held = [];
+      const why = previewPortHeld(pv.origin, held);
+      if (why) bad.push(why);
+    }
+    if (up.code === 0 && !bad.length && !io.stopped()) {
+      // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
+      // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
+      const fwd = pv.reach;
+      if (fwd) reach = io.startReach(fwd);
+      // `/` is asked until it answers below 500 (the forward takes a moment, as a cold pod's first page does).
+      // With a forward: one that exits first (the ssh dropped, the remote port-forward ended) fails the preview, since waiting on
+      // would hold the app's release lock for ever. With none (a long-lived https origin) nothing ends the loop but an answer or the
+      // deadline `previewAnswerWait`: `up` may return before the rollout is done, and the old rc may still be serving.
+      // The probes can pin the new rc only through what a body says (`has`) or a redirect (`location`); they read no header,
+      // so an app that needs the served commit checked puts it in a page body and names it in a probe's `has`.
+      let gone;
+      reach?.status.then((x) => { gone = x; });
+      let said = 0;
+      const began = io.now();
+      for (;;) {
+        if (io.stopped()) break;
+        try { const r = await io.ask("/", null); if (r.status < 500) break; } catch { /* not up yet */ }
+        if (fwd && gone) { bad.push(`the preview's forward (${fwd.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
+        if (!fwd && io.now() - began >= previewAnswerWait) { bad.push(`${pv.origin} did not answer below 500 within ${previewAnswerWait / 60_000} min of the preview's up`); break; }
+        if (io.now() - said >= 5 * 60_000) { said = io.now(); io.say(`preview: still waiting for ${pv.origin}`); }
+        await io.sleep(5_000);
+      }
+      // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
+      // that other listener, not the preview.
+      if (!bad.length && fwd && gone) bad.push(`the preview's forward (${fwd.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
+      if (!bad.length) for (const [name, p] of probes) {
+        if (io.stopped()) break;
+        try {
+          const r = await io.ask(p.path, p);
+          const v = probe(p, r.status, r.body, r.location);
+          if (v) bad.push(`${name} ${v}`);
+        } catch (e) { bad.push(`${name} ${p.path}: ${e.message}`); }
+      }
+    }
+    // Stopped by a signal before its checks ran: no pass to read (a race loser's cancel is no failure).
+    if (io.interrupted() && !bad.length) bad.push(signal);
+  } finally {
+    if (reach) { try { await reach.stop(); } catch { /* already gone */ } }
+    // `down` is idempotent (a preview already gone is removed), so a failure, most often ssh's own 255 when the connection to the node dropped
+    // ("Read from remote host: Operation timed out", the 2026-11-22 02:09 run, which had passed its kill rehearsal), is tried again after a pause:
+    // 15 s, 30 s, 60 s. A preview still standing after the last try fails the run, as ever.
+    let down = await io.down();
+    for (const wait of [15, 30, 60]) {
+      if (down.code === 0) break;
+      io.say(`preview: removing the preview failed (exit ${down.code}); again in ${wait} s`);
+      await io.sleep(wait * 1000);
+      down = await io.down();
+    }
+    downCode = down.code;
+    // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
+    // removes them, which a run that reads as released would hide.
+    if (down.code !== 0) { const m = `removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`; bad.push(m); io.say(`preview: ${m}`); }
+  }
+  return { bad, downCode };
+};
+
 // A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
 // preview is left (`previews`: its `up`, which a signal never stops, and its `down`), or when `grace` + `teardown` ms have passed with no
 // preview left (a stuck child is bounded; a preview's remote operation is waited for, since a lock given back under it would let the next
