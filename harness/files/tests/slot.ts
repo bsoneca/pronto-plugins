@@ -187,14 +187,19 @@
 
 const app = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const defaultPool = "/tmp/pronto-stacks";
-const pool = Deno.env.get("STACK_POOL") ?? defaultPool;
+const pool = Deno.env.get("STACK_POOL") || defaultPool;
 // One pool for the machine (PRONTO-774): a STACK_POOL that is not the default is a second pool, whose
 // holders no claim in the default pool sees, so admission counts about half the load. The warning, or
-// null when the pool is the default.
-export const poolWarning = (set: string | undefined): string | null =>
-  set === undefined || set === "" || set === defaultPool ? null
+// null when the pool is the default (an empty STACK_POOL reads as the default), or when STACK_HOLD_POOL is set:
+// a pr account's runner has its own pool on purpose and reads the applier's holds through it (runners/setups.cue).
+export const poolWarning = (set: string | undefined, hold?: string): string | null =>
+  !set || set === defaultPool || hold ? null
     : `STACK_POOL is ${set}, not ${defaultPool}: its holders are invisible to every claim in the default pool, so admission sees only part of the load; unset STACK_POOL (and STACK_BUDGET) in the shell's startup files`;
-const warnPool = () => { const w = poolWarning(Deno.env.get("STACK_POOL")); if (w) say(`warning: ${w}`); };
+let poolWarned = false;
+const warnPool = () => {
+  const w = poolWarning(Deno.env.get("STACK_POOL"), Deno.env.get("STACK_HOLD_POOL"));
+  if (w && !poolWarned) { poolWarned = true; say(`warning: ${w}`); }
+};
 const budget = Number(Deno.env.get("STACK_BUDGET") ?? Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
 const asked = Number(Deno.env.get("STACK_SLOT") ?? "0");
 // The cue memory budget (GB) and cores (PRONTO-870): what the evaluations claimed through --mem and --cores-claim may add up to.
@@ -1885,7 +1890,7 @@ const orphaned = async () => {
   const rec = m.recordOf(m.readRecords(), Deno.pid, superpid, superstart);
   if (rec) {
     await m.stopMembers(sys, rec);
-    try { Deno.removeSync((Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks") + "/runs/" + rec.rootpid + "-" + rec.rootstart); } catch { /* gone */ }
+    try { Deno.removeSync((Deno.env.get("STACK_POOL") || "/tmp/pronto-stacks") + "/runs/" + rec.rootpid + "-" + rec.rootstart); } catch { /* gone */ }
   }
   try { Deno.removeSync(dir, { recursive: true }); } catch { /* gone */ }
 };

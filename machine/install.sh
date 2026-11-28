@@ -29,11 +29,13 @@ fi
 # One pool for the machine (PRONTO-774): a shell startup file that exports STACK_POOL or STACK_BUDGET makes
 # every login shell claim from a second pool, so the gates in it never see the launchd jobs' holders.
 # The owner's files are not edited here: the install says which line to drop and stops.
-for f in .zshenv .zprofile .zshrc .bash_profile .bashrc .profile; do
-  if [ -f "$HOME/$f" ] && grep -nE '^[[:space:]]*(export[[:space:]]+)?STACK_(POOL|BUDGET)=' "$HOME/$f" >&2; then
-    echo "cue-budget: $HOME/$f sets STACK_POOL or STACK_BUDGET (lines above); drop them so every shell and job shares the default pool, then run this again" >&2
-    exit 1
-  fi
+for d in "$HOME" "${ZDOTDIR:-$HOME}"; do
+  for f in .zshenv .zprofile .zshrc .zlogin .bash_profile .bash_login .bashrc .profile; do
+    if [ -f "$d/$f" ] && grep -nE '^[^#]*STACK_(POOL|BUDGET)=' "$d/$f" >&2; then
+      echo "cue-budget: $d/$f sets STACK_POOL or STACK_BUDGET (lines above); drop them so every shell and job shares the default pool, then run this again" >&2
+      exit 1
+    fi
+  done
 done
 
 mkdir -p "$dest" "$HOME/Library/Logs/pronto" "$(dirname "$mise_config")"
