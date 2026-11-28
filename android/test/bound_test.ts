@@ -188,3 +188,12 @@ Deno.test("only the flags a module lists reach its ctx", async () => {
   assertEquals(screen.querySelector("#flag").textContent, "lobby");
   stop();
 });
+
+Deno.test("the module is told its host: ctx.host is android, which the Unity host's ctx does not carry", async () => {
+  const { screen } = screenOf();
+  const hosted = { init: () => ({}), view: (_s: unknown, _r: unknown, ctx: { host?: string }) => ({ tag: "p", key: "host", attrs: { id: "host" }, text: String(ctx.host) }) };
+  const stop = bound("probe", binding, hosted, quiet())(screen, {});
+  assertEquals(screen.querySelector("#host").textContent, "android");
+  stop();
+  await settle();
+});

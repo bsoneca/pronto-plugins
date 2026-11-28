@@ -247,7 +247,7 @@ export function bound(name, bindingJson, module, { log = console, css = null, ev
     let known = {};
     const ctx = () => {
       const seed = Number.parseInt(new URL(globalThis.location?.href ?? "https://terminal.invalid/").searchParams.get("seed") ?? "0", 10);
-      return { seed: Number.isInteger(seed) ? seed : 0, locale: doc.documentElement.getAttribute("lang") ?? "en", now: Date.now(), flags: globalThis.__hatchFlags ?? known };
+      return { seed: Number.isInteger(seed) ? seed : 0, locale: doc.documentElement.getAttribute("lang") ?? "en", now: Date.now(), flags: globalThis.__hatchFlags ?? known, host: "android" };
     };
     const mountEl = doc.createElement("div");
     mountEl.setAttribute("id", `hatch-${name}`);
