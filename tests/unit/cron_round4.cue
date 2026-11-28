@@ -119,6 +119,16 @@ cases: {
 		{call: "cronlock.previewCycle", args: [{fail: [{op: "writeFile", code: "ENOSPC"}]}], expect: {order: [], recordedBeforeUp: null, record: "removed", threw: "release-cron lock: write preview record state/lock.preview: ENOSPC: ENOSPC: writeFile state/lock.preview.500.u1.tmp", next: null, stray: false}, why: "no record, no up"},
 		{call: "cronlock.previewCycle", args: [{existing: "{\"down\":[\"x\"]}"}], expect: {order: [], recordedBeforeUp: null, record: "kept", threw: "release-cron lock: write preview record state/lock.preview: EEXIST: EEXIST: state/lock.preview", next: "release-cron: state/lock.preview exists: a preview may be left running; not started. Run `x` in its directory, then delete state/lock.preview", stray: false}, why: "an existing record is never overwritten"},
 	]}
+	"the release preview with no forward (a long-lived https origin) checks no port and starts no forward, waits for / below 500 with a deadline, probes the origin, and always runs down": {suite: "cron", steps: [
+		{call: "cronlock.previewDrive", args: [{}], expect: {events: ["up", "ask / x2", "ask /player/1", "down"], bad: [], downCode: 0, waited: 0, deadline: 600}, why: "no `held`, no `reach`: up, then the probes ask the origin"},
+		{call: "cronlock.previewDrive", args: [{answers: {"/": [502, 502, 200]}}], expect: {events: ["up", "ask / x4", "ask /player/1", "down"], bad: [], downCode: 0, waited: 10, deadline: 600}, why: "up returned before the rollout: / is asked again every 5 s until it answers below 500"},
+		{call: "cronlock.previewDrive", args: [{answers: {"/player/1": [502]}}], expect: {events: ["up", "ask / x2", "ask /player/1", "down"], bad: ["player /player/1: 502, expected 200"], downCode: 0, waited: 0, deadline: 600}, why: "down runs after a probe fails"},
+		{call: "cronlock.previewDrive", args: [{answers: {"/": ["down"]}}], expect: {events: ["up", "ask / x121", "down"], bad: ["https://rc.example did not answer below 500 within 10 min of the preview's up"], downCode: 0, waited: 600, deadline: 600}, why: "nothing ends the wait but an answer or the deadline; the probes are skipped and down runs"},
+		{call: "cronlock.previewDrive", args: [{upCode: 1}], expect: {events: ["up", "down"], bad: ["the preview (mise run up) failed (exit 1)"], downCode: 0, waited: 0, deadline: 600}, why: "a failed up is not probed, and is removed"},
+	]}
+	"the release preview with a forward checks the port, starts the forward before the probes and stops it before down": {suite: "cron", steps: [
+		{call: "cronlock.previewDrive", args: [{reach: ["ssh", "-L", "x"], origin: "http://localhost:18080"}], expect: {events: ["up", "held", "reach", "ask / x2", "ask /player/1", "reach stop", "down"], bad: [], downCode: 0, waited: 0, deadline: 600}},
+	]}
 	"a previous preview's record stops the run, readable or not, naming the record and the cleanup; no record lets it go on": {suite: "cron", steps: [
 		{call: "cronlock.preview", args: ["ENOENT", ""], expect: null},
 		{call: "cronlock.preview", args: [null, "{\"down\":[\"mise\",\"run\",\"down\"],\"dir\":\"/w/app\"}"], expect: "release-cron: state/lock.preview exists: a preview may be left running; not started. Run `mise run down` in /w/app, then delete state/lock.preview"},

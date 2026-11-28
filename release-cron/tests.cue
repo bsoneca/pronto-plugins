@@ -122,6 +122,39 @@ _aliveCron: #Cron & {watch: ["x"], probes: {}, target: {
 	preview: {up: ["sh", "-c", "ssh \(_aliveOpts) h up"], reach: ["sh", "-c", "ssh -L 1:1:1 \(_aliveOpts) h"], down: ["sh", "-c", "ssh \(_aliveOpts) h down"]}
 }}
 sshAliveAccepted: _aliveCron.target._alive & [true, true, true, true, true]
+// A preview against a long-lived https origin (PRONTO-740): no `reach`, the probes go straight to it.
+_prevT: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}
+_httpsPreview: #Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.bonkchess.com"}}}
+httpsNoReachAccepted: _httpsPreview.target.preview.origin & "https://rc.bonkchess.com"
+_httpsPort: #Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example:8443"}}}
+httpsPortAccepted: _httpsPort.target.preview.origin & "https://rc.example:8443"
+httpsPathRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example/app"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsSlashRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example/"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsQueryRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example?x=1"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsFragmentRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example#x"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsUserinfoRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://u:p@rc.example"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+localhostNoReachRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "http://localhost:18080"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+defaultOriginNoReachRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"]}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+remoteHttpRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], reach: ["./f.sh"], origin: "http://rc.example"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsUpperSchemeRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "HTTPS://rc.example"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsBareRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsSpaceRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc .example"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsPercentRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc%2eexample"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsIpv6Refused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://[2001:db8::1]"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsEmptyPortRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example:"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsEmptyLabelRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc..example"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsPortTooLongRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://rc.example:123456"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsLocalhostRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://localhost"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsLocalhostPortRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://localhost:8443"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsLocalhostUpperRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://LocalHost"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsSubLocalhostRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://a.localhost"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsLoopbackRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://127.0.0.1:8443"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsLoopbackRangeRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://127.1.2.3"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+httpsIpv6LoopbackRefused: [if (#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: "https://[::1]"}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+_httpsLocalhostReach: #Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], reach: ["./f.sh"], origin: "http://localhost:18081"}}}
+httpsLikeNamesAccepted: [for o in ["https://localhost.example", "https://notlocalhost.example", "https://1270.example", "https://a-b.c-d.example:65535"] {(#Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], origin: o}}}).target.preview.origin}] & ["https://localhost.example", "https://notlocalhost.example", "https://1270.example", "https://a-b.c-d.example:65535"]
+_localReach: #Cron & {watch: ["x"], probes: {}, target: _prevT & {preview: {up: ["./u.sh"], down: ["./d.sh"], reach: ["./f.sh"]}}}
+localhostReachDefault: _localReach.target.preview.origin & "http://localhost:18080"
 // A command with no ssh needs nothing.
 _noSsh: #Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}}
 noSshAccepted: _noSsh.target._alive & [true, true]

@@ -290,6 +290,14 @@ before PRONTO-758. Studio's `refs/released/studio`, written after `release@k8s` 
 worktree's HEAD does not (Bonk Chess's moves before `mise install` and `release@k8s`, so a drop after the checkout would
 count as released while the old pods still serve; PRONTO-870).
 
+`preview.origin` is either `http://localhost:<port>` (the default, `http://localhost:18080`), reached through `preview.reach`, a
+forward the run starts and kills, which is then required; or a long-lived `https://` origin (scheme, host, optional port: no
+userinfo, path, query or fragment, and no loopback host, so `https://rc.bonkchess.com`), already reachable, which has no `reach`.
+With no `reach` the run starts no forward and checks no port. After `up` it asks `/` every 5 s until it answers below 500, for
+10 min at most (`up` can return before the rollout is done, and the previous rc may still serve), then the probes; `down` always
+runs. The probes read a page body (`has`) or a redirect (`location`), not a header: an app that needs the served commit checked
+puts it in a page body and names it in a probe's `has`.
+
 ## Install, pause, remove
 
 ```sh
