@@ -3,11 +3,17 @@
 // Written byte for byte into a repository by `bin/pronto-node --host`; a node's file unifies #Host with its values.
 package schema
 
+import "list"
+
 #Host: {
 	dockerGC: #DockerGC
 	// Opt-in: a host that is not a k3s node (no kubectl, no Dapr) holds no repair timer.
 	daprHeal?: #DaprHeal
 	kubelet?: #Kubelet
+	// Opt-in: a host that cannot reach a notification channel says none.
+	diskWatch?: #DiskWatch
+	// Opt-in: a host with no k3s names no workloads.
+	critical?: #Critical
 }
 
 // The node's kubelet, set by kubelet.nu (README.md, "The node host"): how full the disk may get before pods
@@ -91,3 +97,37 @@ package schema
 }
 
 #OperatorNamespace: string & =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" & !~"^(default|dapr-system|kube-system|kube-public|kube-node-lease)$" & !~"^studio-"
+
+// The host's own disk alarm (PRONTO-2061): every pod of the 2026-11-27 outage was evicted, alerting with them, so nothing said the
+// disk was filling. A timer's job (disk-watch.sh) runs on the host, with no pod, Prometheus or tunnel to lose: it reads the use of each
+// of `mounts` and posts to `notifyUrl` when one reaches `thresholdPercent`, once per crossing, and again every `renotifyMinutes` while
+// it stays over. The URL must lead off the node (a channel behind the node's own tunnel is down with it), and is the only way the node
+// reaches the operator, so it is said, with no default: a node names its channel. It is a secret (anyone holding it can post to the
+// channel), so its settings file is readable by root alone.
+#DiskWatch: {
+	// Paths whose filesystems are read: two on one filesystem are one disk.
+	mounts: *["/", "/var/lib/containerd", "/var/lib/rancher"] | [#Mount, ...#Mount]
+	thresholdPercent: *75 | (int & >=10 & <=99)
+	renotifyMinutes:  *360 | (int & >=5)
+	// An https URL with no quote, space or control character (it is written single-quoted into a settings file).
+	notifyUrl!: =~"^https://[^'\\s\\x00-\\x1f\\x7f]+$"
+	// A systemd OnCalendar expression, every minute by default; one line and no backslash, as dockerGC's.
+	onCalendar: *"minutely" | (string & =~"^[^\n\r\\\\]+$")
+}
+
+#Mount: string & =~"^/[A-Za-z0-9._/-]*$"
+
+// The workloads that must outlive an eviction (PRONTO-2061): the kubelet evicts the lowest priority first, and a pod with no
+// priority class goes before a system one. host.nu only checks (a class is set by the workload's own manifest, in the repository that
+// deploys it) and reports a workload that is gone, or runs under no system-*-critical class, as drift. Few on purpose: a node whose
+// every pod is critical has none to evict first, which weakens eviction itself.
+#Critical: {
+	kubectl: *"k3s kubectl" | "kubectl"
+	workloads!: list.MaxItems(8) & [#Workload, ...#Workload]
+}
+
+#Workload: {
+	namespace!: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" & !~"^studio-"
+	kind:       *"Deployment" | "StatefulSet" | "DaemonSet"
+	name!:      =~"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+}

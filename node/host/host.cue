@@ -7,6 +7,7 @@ package host
 
 _dockerGC: _ @embed(file="docker-gc.sh", type=text)
 _daprHeal: _ @embed(file="dapr-heal.sh", type=text)
+_diskWatch: _ @embed(file="disk-watch.sh", type=text)
 _hostNu:   _ @embed(file="host.nu", type=text)
 _kubelet:  _ @embed(file="kubelet.nu", type=text)
 _schema:   _ @embed(file="schema/host.cue", type=text)
@@ -15,6 +16,7 @@ _schema:   _ @embed(file="schema/host.cue", type=text)
 #Files: {
 	"node-host/docker-gc.sh":    _dockerGC
 	"node-host/dapr-heal.sh":    _daprHeal
+	"node-host/disk-watch.sh":   _diskWatch
 	"node-host/host.nu":         _hostNu
 	"node-host/kubelet.nu":      _kubelet
 	"node-host/schema/host.cue": _schema

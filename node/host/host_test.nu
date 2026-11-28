@@ -34,6 +34,12 @@ def main [] {
 	test_a_host_that_drops_daprHeal_loses_its_timer_and_files
 	test_removal_keeps_the_files_unless_systemd_says_the_timer_is_stopped
 	test_removal_decides_a_timer_is_absent_by_its_file
+	test_the_disk_watch_schema_names_a_channel_and_bounds_the_list
+	test_a_host_with_diskWatch_holds_a_root_only_env_and_a_third_timer
+	test_the_disk_watch_posts_once_a_crossing_and_again_after_the_interval
+	test_the_disk_watch_fails_loudly_when_it_cannot_post_or_read
+	test_a_host_that_drops_diskWatch_loses_its_timer_and_files
+	test_critical_workloads_are_checked_and_apply_cannot_set_them
 	print "\nAll node host tests passed."
 }
 
@@ -183,6 +189,9 @@ case "$1" in
   is-failed) [ -e "$d/failed" ] ;;
   is-enabled | is-active)
     case "$*" in
+      *disk-watch*)
+        if [ -e "$d/watch.on" ]; then if [ "$1" = is-active ]; then echo active; else echo enabled; fi; exit 0; fi
+        if [ "$1" = is-active ]; then echo inactive; exit 3; else echo disabled; exit 1; fi ;;
       *dapr-heal*)
         if [ -n "$NOTFOUND" ] && [ ! -e "$d/heal.on" ]; then if [ "$1" = is-active ]; then echo inactive; exit 3; else echo not-found; exit 4; fi; fi
         if [ -n "$UNREADABLE" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
@@ -190,8 +199,8 @@ case "$1" in
         if [ "$1" = is-active ]; then echo inactive; exit 3; else echo disabled; exit 1; fi ;;
     esac
     [ -e "$d/on" ] ;;
-  disable) case "$*" in *dapr-heal*) [ -n "$KEEPON" ] || rm -f "$d/heal.on" ;; esac ;;
-  enable) touch "$d/on"; case "$*" in *dapr-heal*) touch "$d/heal.on" ;; esac ;;
+  disable) case "$*" in *dapr-heal*) [ -n "$KEEPON" ] || rm -f "$d/heal.on" ;; *disk-watch*) rm -f "$d/watch.on" ;; esac ;;
+  enable) touch "$d/on"; case "$*" in *dapr-heal*) touch "$d/heal.on" ;; *disk-watch*) touch "$d/watch.on" ;; esac ;;
   show) if [ -e "$d/needreload" ]; then echo yes; else echo no; fi ;;
   daemon-reload) rm -f "$d/needreload" ;;
   start) if [ -n "$STARTEXIT" ]; then exit "$STARTEXIT"; fi; [ "$STAYFAILED" = 1 ] || rm -f "$d/failed" ;;
@@ -582,4 +591,216 @@ def test_removal_decides_a_timer_is_absent_by_its_file [] {
 		assert str contains $failed "is not disabled"
 		assert ($root2 + "/etc/pronto/dapr-heal.env" | path exists) "files kept"
 	}
+}
+
+def with-watch []: nothing -> record {
+	(defaults) | merge {diskWatch: {mounts: ["/" "/var/lib/containerd" "/var/lib/rancher"], thresholdPercent: 75, renotifyMinutes: 360, notifyUrl: "https://ntfy.example.org/node-x7k2", onCalendar: "minutely"}}
+}
+
+def test_the_disk_watch_schema_names_a_channel_and_bounds_the_list [] {
+	print "test diskWatch has no default channel and refuses a URL that is not https or could break its file, and critical is a short list of operator workloads..."
+	assert (not (host-with "{diskWatch: {}}").ok) "no channel said: none is assumed"
+	assert equal (host-with "{diskWatch: {notifyUrl: \"https://ntfy.example.org/node-x7k2\"}}").host.diskWatch (with-watch).diskWatch
+	assert (not (host-with "{diskWatch: {notifyUrl: \"http://ntfy.example.org/t\"}}").ok) "a channel in the clear"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t'x\"}}").ok) "a quote in the URL"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t x\"}}").ok) "a space in the URL"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\\nx\"}}").ok) "a newline in the URL"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", thresholdPercent: 100}}").ok) "a threshold of a full disk"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", renotifyMinutes: 1}}").ok) "a re-notify every minute"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: []}}").ok) "no mount"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: [\"var\"]}}").ok) "a relative mount"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", mounts: [\"/a b\"]}}").ok) "a mount with a space"
+	assert (not (host-with "{diskWatch: {notifyUrl: \"https://a.org/t\", onCalendar: \"\"}}").ok) "no schedule"
+	let one = "{critical: {workloads: [{namespace: \"alerts\", name: \"alerting\"}]}}"
+	assert equal (host-with $one).host.critical {kubectl: "k3s kubectl", workloads: [{namespace: "alerts", kind: "Deployment", name: "alerting"}]}
+	assert (not (host-with "{critical: {}}").ok) "no workload said"
+	assert (not (host-with "{critical: {workloads: []}}").ok) "an empty list"
+	assert (not (host-with "{critical: {workloads: [{namespace: \"studio-ana-game-1a2b3c\", name: \"web\"}]}}").ok) "a tenant's namespace"
+	assert (not (host-with "{critical: {workloads: [{namespace: \"alerts\", kind: \"Pod\", name: \"a\"}]}}").ok) "a kind that is not a workload"
+	let nine = (1..9 | each {|i| $"{namespace: \"ns($i)\", name: \"w($i)\"}" } | str join ", ")
+	assert (not (host-with $"{critical: {workloads: [($nine)]}}").ok) "a list so long that everything is critical"
+}
+
+def test_a_host_with_diskWatch_holds_a_root_only_env_and_a_third_timer [] {
+	print "test a host with diskWatch also holds its env (mode 600), script, service and timer, and checks the third timer..."
+	let files = (render (with-watch))
+	assert equal ($files | get path | last 4) ["/etc/pronto/disk-watch.env" "/usr/local/lib/pronto/disk-watch.sh" "/etc/systemd/system/pronto-disk-watch.service" "/etc/systemd/system/pronto-disk-watch.timer"]
+	let envfile = ($files | where path == "/etc/pronto/disk-watch.env" | first)
+	assert equal $envfile.mode "600" "the URL is the channel's key"
+	assert equal $envfile.text "# pronto-plugins node/host (disk watch): what disk-watch.sh reads, from the node's #Host diskWatch.\nMOUNTS='/ /var/lib/containerd /var/lib/rancher'\nTHRESHOLD_PERCENT=75\nRENOTIFY_MINUTES=360\nNOTIFY_URL='https://ntfy.example.org/node-x7k2'\n"
+	assert str contains ($files | where path == "/etc/systemd/system/pronto-disk-watch.timer" | first | get text) "OnCalendar=minutely\n"
+	assert equal (render (defaults) | length) 4 "a host with no diskWatch holds none of its files"
+	assert equal (render ((with-heal) | merge {diskWatch: (with-watch).diskWatch}) | length) 12
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		assert equal (apply (with-watch) --root $root | length) 10
+		assert equal (ls -l ($root + "/etc/pronto/disk-watch.env") | first | get mode | into string) "rw-------"
+		let log = (open --raw ($dir | path join systemctl.log))
+		assert str contains $log "enable --now pronto-disk-watch.timer"
+		assert equal (apply (with-watch) --root $root) []
+		touch ($dir | path join failed)
+		assert equal (apply (with-watch) --root $root | length) 2 "the watcher that failed its last run is drift"
+	}
+	rm -rf $dir
+	let bad = (try { render ((with-watch) | merge {diskWatch: {notifyUrl: "http://x"}}); "rendered" } catch {|e| $e.msg })
+	assert str contains $bad "diskWatch is not what #Host allows"
+}
+
+# A stand-in df and curl: df answers each path from `uses` ({path: "use [mount]"}, "bad" for a path it cannot read), curl records
+# its arguments and fails when `curlfail` exists. Returns {code, out, posts}.
+def run-watch [dir: string, host: record, uses: record, extra: record = {}]: nothing -> record {
+	mkdir ($dir | path join bin)
+	let envf = ($dir | path join disk-watch.env)
+	(render $host | where path == "/etc/pronto/disk-watch.env" | first | get text) | save --force --raw $envf
+	(($uses | items {|k, v| $"($k) ($v)" } | str join "\n") + "\n") | save --force --raw ($dir | path join uses)
+	r##'#!/bin/bash
+d=$(dirname "$0")/..
+while read -r p u m; do
+  if [ "$p" = "$2" ]; then
+    [ "$u" = bad ] && { echo "df: $p: No such file or directory" >&2; exit 1; }
+    echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+    echo "/dev/vda1 1000 500 500 $u ${m:-$p}"
+    exit 0
+  fi
+done <"$d/uses"
+exit 1
+'## | save --force --raw ($dir | path join bin df)
+	r##'#!/bin/bash
+d=$(dirname "$0")/..
+[ -e "$d/curlfail" ] && exit 22
+echo "$*" >>"$d/posts"
+'## | save --force --raw ($dir | path join bin curl)
+	chmod 755 ($dir | path join bin df) ($dir | path join bin curl)
+	let r = (with-env {PATH: $"($dir | path join bin):/usr/bin:/bin", DISK_WATCH_ENV: $envf, DISK_WATCH_STATE: ($dir | path join state)} { ^/bin/bash ($here | path join disk-watch.sh) ...($extra.args? | default []) | complete })
+	let posts = if ($dir | path join posts | path exists) { open --raw ($dir | path join posts) | lines } else { [] }
+	{code: $r.exit_code, out: ($r.stdout + $r.stderr), posts: $posts}
+}
+
+def test_the_disk_watch_posts_once_a_crossing_and_again_after_the_interval [] {
+	print "test the watcher posts at 76% once, nothing at 74% or while it stays over, posts again after the interval, and a crossing that ended is a new one..."
+	let dir = (tmp)
+	let host = (with-watch)
+	let at = {|c| {"/": "40%" "/var/lib/containerd": $"($c)% /var/lib/containerd" "/var/lib/rancher": "40%"} }
+	let a = (run-watch $dir $host (do $at 76))
+	assert equal $a.code 0
+	assert equal ($a.posts | length) 1
+	assert str contains ($a.posts | first) "https://ntfy.example.org/node-x7k2"
+	assert str contains ($a.posts | first) "/var/lib/containerd is 76% full (alert at 75%)"
+	let b = (run-watch $dir $host (do $at 76))
+	assert equal ($b.posts | length) 1 "once per crossing"
+	# 74% is under the line but inside the hysteresis: the same crossing, nothing posted.
+	let c = (run-watch $dir $host (do $at 74))
+	assert equal ($c.posts | length) 1
+	# The mark is old enough: told again.
+	"1\n" | save --force --raw ($dir | path join state _var_lib_containerd)
+	let d = (run-watch $dir $host (do $at 80))
+	assert equal ($d.posts | length) 2 "re-notified after renotifyMinutes"
+	assert str contains ($d.posts | last) "80% full"
+	# It falls well under and rises again: a new crossing, told at once.
+	run-watch $dir $host (do $at 50) | ignore
+	assert (not ($dir | path join state _var_lib_containerd | path exists)) "the mark of an ended crossing is dropped"
+	let e = (run-watch $dir $host (do $at 90))
+	assert equal ($e.posts | length) 3
+	rm -rf $dir
+	let dir2 = (tmp)
+	let quiet = (run-watch $dir2 $host {"/": "74%" "/var/lib/containerd": "10%" "/var/lib/rancher": "10%"})
+	assert equal $quiet.posts [] "74% posts nothing"
+	assert equal $quiet.code 0
+	let same = (run-watch $dir2 $host {"/": "76% /" "/var/lib/containerd": "76% /" "/var/lib/rancher": "76% /"})
+	assert equal ($same.posts | length) 1 "two paths on one filesystem are one disk"
+	rm -rf $dir2
+	let dir3 = (tmp)
+	let dry = (run-watch $dir3 $host {"/": "76%" "/var/lib/containerd": "10%" "/var/lib/rancher": "10%"} {args: ["--dry-run"]})
+	assert equal $dry.posts []
+	assert str contains $dry.out "would post: "
+	assert (not ($dir3 | path join state | path exists)) "a dry run keeps no state"
+	rm -rf $dir3
+}
+
+def test_the_disk_watch_fails_loudly_when_it_cannot_post_or_read [] {
+	print "test a post that fails is tried again and fails the run, and a mount df cannot read fails it instead of going quiet..."
+	let dir = (tmp)
+	let host = (with-watch)
+	let over = {"/": "76%" "/var/lib/containerd": "10%" "/var/lib/rancher": "10%"}
+	mkdir ($dir | path join bin)
+	touch ($dir | path join curlfail)
+	let a = (run-watch $dir $host $over)
+	assert equal $a.code 1
+	assert str contains $a.out "could not post"
+	assert equal (ls ($dir | path join state) | length) 0 "no mark when the post failed"
+	rm -f ($dir | path join curlfail)
+	let b = (run-watch $dir $host $over)
+	assert equal $b.code 0
+	assert equal ($b.posts | length) 1 "the next run posts"
+	rm -rf $dir
+	let dir2 = (tmp)
+	let c = (run-watch $dir2 $host {"/": "10%" "/var/lib/containerd": "bad" "/var/lib/rancher": "10%"})
+	assert equal $c.code 1
+	assert str contains $c.out "cannot read /var/lib/containerd"
+	rm -rf $dir2
+}
+
+def test_a_host_that_drops_diskWatch_loses_its_timer_and_files [] {
+	print "test removing diskWatch is drift for --check and apply stops its timer and removes its four files..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	let files = ["/etc/pronto/disk-watch.env" "/usr/local/lib/pronto/disk-watch.sh" "/etc/systemd/system/pronto-disk-watch.service" "/etc/systemd/system/pronto-disk-watch.timer"]
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (with-watch) --root $root | ignore
+		let checked = (apply (defaults) --root $root --check)
+		assert equal ($checked | length) 4
+		assert str contains ($checked | first) "is installed but the host has no diskWatch"
+		for f in $files { assert ($root + $f | path exists) $"($f) kept by --check" }
+		apply (defaults) --root $root | ignore
+		for f in $files { assert (not ($root + $f | path exists)) $"($f) removed" }
+		let log = (open --raw ($dir | path join systemctl.log))
+		assert str contains $log "disable --now pronto-disk-watch.timer"
+		assert equal (apply (defaults) --root $root) []
+	}
+	rm -rf $dir
+}
+
+def test_critical_workloads_are_checked_and_apply_cannot_set_them [] {
+	print "test a workload that is gone or has no system critical class is drift for --check and apply, and one at the class is not..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	mkdir ($root + "/usr/local/bin")
+	# A stand-in k3s: answers what the test wrote for the workload (name/class), nothing for one that is gone.
+	r##'#!/bin/bash
+d=$(dirname "$0")/../../../..
+echo "$*" >>"$d/kubectl.log"
+case "$*" in *"alerting"*) cat "$d/class.alerting" 2>/dev/null ;; *"vector"*) cat "$d/class.vector" 2>/dev/null ;; *"broken"*) echo "the server is down" >&2; exit 1 ;; esac
+exit 0
+'## | save --force --raw ($root + "/usr/local/bin/k3s")
+	chmod 755 ($root + "/usr/local/bin/k3s")
+	let host = ((defaults) | merge {critical: {kubectl: "k3s kubectl", workloads: [{namespace: "alerts", kind: "Deployment", name: "alerting"} {namespace: "logging", kind: "DaemonSet", name: "vector"}]}})
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply $host --root $root | ignore
+		"alerting/system-cluster-critical" | save --force --raw ($dir | path join class.alerting)
+		"vector/" | save --force --raw ($dir | path join class.vector)
+		let d = (apply $host --root $root --check)
+		assert equal ($d | length) 1
+		assert str contains ($d | first) "logging/daemonset/vector runs under priority class '', not system-cluster-critical or system-node-critical"
+		assert (($d | first) | str ends-with "not set by apply)")
+		"vector/system-node-critical" | save --force --raw ($dir | path join class.vector)
+		assert equal (apply $host --root $root --check) [] "both at a system class"
+		rm -f ($dir | path join class.vector)
+		let gone = (apply $host --root $root --check)
+		assert str contains ($gone | first) "logging/daemonset/vector does not exist"
+		"alerting/high" | save --force --raw ($dir | path join class.alerting)
+		assert equal (apply $host --root $root --check | length) 2 "a priority class that is not a system one"
+		# A cluster that cannot answer is an error, never a clean check.
+		let broken = ((defaults) | merge {critical: {kubectl: "k3s kubectl", workloads: [{namespace: "alerts", kind: "Deployment", name: "broken"}]}})
+		let e = (try { apply $broken --root $root --check; "answered" } catch {|err| $err.msg })
+		assert str contains $e "reading alerts/deployment/broken failed"
+		assert str contains (open --raw ($dir | path join kubectl.log)) "get deployment alerting -n alerts"
+	}
+	rm -rf $dir
+	# The vet refuses values the schema does not allow, before any ssh or kubectl.
+	let bad = (try { render ((defaults) | merge {critical: {kubectl: "/tmp/evil", workloads: [{namespace: "alerts", kind: "Deployment", name: "a"}]}}); "rendered" } catch {|e| $e.msg })
+	assert str contains $bad "critical is not what #Host allows"
 }

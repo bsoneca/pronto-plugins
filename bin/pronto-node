@@ -5,7 +5,7 @@
 # --release-rule also merges the release@k8s rule into each app's .say.json (an app that has it keeps it without the flag).
 # Or the node host files (node/host/, node/README.md, "The node host") into the folder that holds a node's values:
 #   bin/pronto-node --host <dir>...
-# which writes <dir>/node-host/{docker-gc.sh,dapr-heal.sh,host.nu,kubelet.nu,schema/host.cue}, each regenerated.
+# which writes <dir>/node-host/{docker-gc.sh,dapr-heal.sh,disk-watch.sh,host.nu,kubelet.nu,schema/host.cue}, each regenerated.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 usage="usage: pronto-node --engine [--release-rule] <app-dir>... | --host <dir>..."
