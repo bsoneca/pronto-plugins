@@ -28,6 +28,7 @@ def main [--kind: string = ""] {
 	test_services_and_secrets
 	test_an_externalsecret_takes_no_superuser_secret_as_a_template_source
 	test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone
+	test_an_externalsecret_writes_its_own_secret_as_its_owner_and_no_guarded_one
 	test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template
 	test_an_enum_value_is_compared_as_the_engine_compares_it
 	test_a_cluster_is_held_to_the_engines_allow_list
@@ -241,6 +242,26 @@ def test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone [
 	assert ($from | str contains $"== '($tes.generatorAPIVersion)'") $from
 	# the policy has no way to name a store: none of the words that read one is allowed by a list
 	for w in [extract find storeRef remoteRef] { assert (not ($from | str contains $"'($w)'")) $"the dataFrom rule allows ($w): ($from)" }
+}
+
+def test_an_externalsecret_writes_its_own_secret_as_its_owner_and_no_guarded_one [] {
+	print "test an ExternalSecret writes the Secret of its own name as its Owner, none that ends in a guarded suffix, and a database Secret of a generated password alone, each read off #TenantExternalSecret (PRONTO-2147)..."
+	let tes = (schema '#TenantExternalSecret')
+	let own = (one-rule externalsecrets "Secret of its own name")
+	assert ($own | str contains "object.spec.target.name == object.metadata.name") $own
+	for k in $tes.creationPolicies { assert ($own | str contains $"in ['($k)']") $own }
+	let su = (one-rule externalsecrets "no Secret that holds a database's superuser password")
+	assert equal ($tes.superuserSuffixes | length) 1
+	for x in $tes.superuserSuffixes { assert ($su | str contains $"object.metadata.name.endsWith\('($x)'\)") $su }
+	assert (not ($su | str contains $tes.dbSecretSuffix)) $"the superuser rule refuses upstream's own database Secret: ($su)"
+	let db = (one-rule externalsecrets "writes a database Secret")
+	assert ($db | str contains $"endsWith\('($tes.dbSecretSuffix)'\)") $db
+	assert ($db | str contains "!has(object.spec.target.template.templateFrom)") $db
+	for k in $tes.dbSecretKeys { assert ($db | str contains $"'($k)'") $db }
+	assert ($db | str contains $"matches\('($tes.dbSecretPassword)'\)") $db
+	# a plain Secret of a guarded name is the same write by another route
+	let plain = (one-rule secrets "no Secret that holds a database's superuser password")
+	for x in (schema '#TenantGuardedSecretSuffixes') { assert ($plain | str contains $"object.metadata.name.endsWith\('($x)'\)") $plain }
 }
 
 def test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template [] {

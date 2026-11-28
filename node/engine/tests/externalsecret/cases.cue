@@ -21,8 +21,11 @@ package externalsecret
 	refused: [K=string]: {"ns": ns, name: *"steal" | string, says: [_, ...]}
 
 	// A Password generator's value, drawn by name.
+	allowed: "draws a Password generator's value": {
+		name: "app-pw"
+		object: spec: target: name: "app-pw"
+	}
 	allowed: "draws a Password generator's value": object: spec: {
-		target: name: "app-pw"
 		dataFrom: [{sourceRef: generatorRef: {kind: "Password", name: "app-pw-gen"}}]
 	}
 	// upstream pronto v1.5.1's `<app>-db-postgres` (k8s/schema/k8s.cue): an empty `data`, the generator's value renamed, a basic-auth template.
@@ -37,6 +40,53 @@ package externalsecret
 				rewrite: [{regexp: {source: "password", target: "POSTGRES_PASSWORD"}}]
 			}]
 		}
+	}
+
+	// PRONTO-2147: the Secret it writes. The engine's own login ExternalSecret (`<release>-<login>-db`, Owner, a url beside the password) is one the rules let through.
+	allowed: "writes its own Secret as its Owner": object: spec: {
+		target: {name: "ok", creationPolicy: "Owner", template: {type: "kubernetes.io/basic-auth", data: {username: "u", password: "{{ .U_PASSWORD }}", url: "postgres://u:{{ .U_PASSWORD }}@database:5432/app"}}}
+		dataFrom: [{sourceRef: generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: "g"}, rewrite: [{regexp: {source: "password", target: "U_PASSWORD"}}]}]
+	}
+
+	refused: "merges into the cluster's superuser Secret": {
+		name: "app-db-superuser"
+		object: spec: {
+			target: {creationPolicy: "Merge", template: data: password: "chosen"}
+			dataFrom: [{sourceRef: generatorRef: {kind: "Password", name: "g"}}]
+		}
+		says: [
+			"ExternalSecret/app-db-superuser sets spec.target.creationPolicy Merge: a tenant's ExternalSecret creates its Secret as its Owner alone (#TenantExternalSecret)",
+			"ExternalSecret/app-db-superuser writes a Secret that holds a database's superuser password (#TenantGuardedSecretSuffixes)",
+		]
+	}
+	refused: "targets a Secret of another name": {
+		object: spec: target: {name: "app-db-postgres", creationPolicy: "Merge"}
+		says: [
+			"ExternalSecret/steal sets spec.target.name app-db-postgres, which is not its own name: a tenant's ExternalSecret writes the Secret of its own name (#TenantExternalSecret)",
+			"ExternalSecret/steal sets spec.target.creationPolicy Merge: a tenant's ExternalSecret creates its Secret as its Owner alone (#TenantExternalSecret)",
+		]
+	}
+	refused: "orphans or keeps no ownership of its Secret": {
+		object: spec: target: creationPolicy: "Orphan"
+		says: ["ExternalSecret/steal sets spec.target.creationPolicy Orphan: a tenant's ExternalSecret creates its Secret as its Owner alone (#TenantExternalSecret)"]
+	}
+	refused: "writes the database Secret with a password of its own": {
+		name: "app-db-postgres"
+		object: spec: target: template: data: {username: "postgres", password: "chosen"}
+		says: ["ExternalSecret/app-db-postgres sets a database Secret's password that is no reference to a generated key, but a value of its own (#TenantExternalSecret)"]
+	}
+	refused: "writes the database Secret with a template source and a key of its own": {
+		name: "app-db-postgres"
+		object: spec: target: template: {templateFrom: [{secret: name: "other"}], data: {username: "postgres", password: "{{ .P }}", extra: "x"}}
+		says: [
+			"ExternalSecret/app-db-postgres sets spec.target.template.templateFrom on a database Secret (#TenantExternalSecret)",
+			"ExternalSecret/app-db-postgres sets spec.target.template.data.extra on a database Secret, which holds only username and password (#TenantExternalSecret)",
+		]
+	}
+	refused: "writes another release's database Secret": {
+		name: "other-db-postgres"
+		object: spec: target: creationPolicy: "Owner"
+		says: ["ExternalSecret/other-db-postgres writes a database Secret that is not app-db-postgres: a tenant's database is the release's own (#TenantExternalSecret)"]
 	}
 
 	refused: "names a ClusterSecretStore and looks a key up in it": object: spec: {

@@ -707,6 +707,36 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 				if $gv != null and $gv != $tes.generatorAPIVersion { $why = ($why | append $"($at) draws from a generator of ($gv), not ($tes.generatorAPIVersion) \(#TenantExternalSecret\)") }
 			}
 		}
+		# PRONTO-2147: the Secret an ExternalSecret writes (#TenantExternalSecret). The name that reaches the controller is spec.target.name, else the object's own; a tenant's is its own,
+		# created as its Owner, and never a guarded one: a Merge onto `<cluster>-superuser`, a legacy Cluster's superuserSecret (read live, which no admission policy can) or the release's
+		# `<release>-db-postgres` would write the database superuser's password. Upstream's `<release>-db-postgres` alone passes, with a generated password and no template source.
+		if ($o.kind? | default "") == "ExternalSecret" {
+			let own = ($o.metadata?.name? | default "")
+			let target = ($o.spec?.target? | default {})
+			let tname = ($target | get -o name)
+			if $tname != null and $tname != $own { $why = ($why | append $"($id) sets spec.target.name ($tname), which is not its own name: a tenant's ExternalSecret writes the Secret of its own name \(#TenantExternalSecret\)") }
+			let policy = ($target | get -o creationPolicy)
+			if $policy != null and $policy not-in $tes.creationPolicies { $why = ($why | append $"($id) sets spec.target.creationPolicy ($policy): a tenant's ExternalSecret creates its Secret as its Owner alone \(#TenantExternalSecret\)") }
+			let written = ([$own] | append (if $tname != null { [$tname] } else { [] }) | uniq)
+			if ($written | any {|n| $n in $guarded_secrets or ($tes.superuserSuffixes | any {|x| $n | str ends-with $x }) }) { $why = ($why | append $"($id) writes a Secret that holds a database's superuser password \(#TenantGuardedSecretSuffixes\)") }
+			if ($written | any {|n| $n | str ends-with $tes.dbSecretSuffix }) {
+				let want = $"($node.name? | default '')($tes.dbSecretSuffix)"
+				if $own != $want { $why = ($why | append $"($id) writes a database Secret that is not ($want): a tenant's database is the release's own \(#TenantExternalSecret\)") }
+				let tpl = ($target | get -o template | default {})
+				if ($tpl | get -o templateFrom) != null { $why = ($why | append $"($id) sets spec.target.template.templateFrom on a database Secret \(#TenantExternalSecret\)") }
+				let data = ($tpl | get -o data | default {})
+				for k in (try { $data | columns } catch { [] }) {
+					if $k not-in $tes.dbSecretKeys { $why = ($why | append $"($id) sets spec.target.template.data.($k) on a database Secret, which holds only username and password \(#TenantExternalSecret\)") }
+				}
+				let pw = ($data | get -o password)
+				if $pw != null and not (($pw | into string) =~ $tes.dbSecretPassword) { $why = ($why | append $"($id) sets a database Secret's password that is no reference to a generated key, but a value of its own \(#TenantExternalSecret\)") }
+			}
+		}
+		# a plain Secret of a guarded name is the same write by another route
+		if ($o.kind? | default "") == "Secret" {
+			let n = ($o.metadata?.name? | default "")
+			if $n in $guarded_secrets or ($guarded_suffixes | any {|x| $n | str ends-with $x }) { $why = ($why | append $"($id) is a name that holds a database's superuser password: a tenant's release writes no such Secret \(#TenantGuardedSecretSuffixes\)") }
+		}
 		# an ExternalSecret that writes its target from a manifest of its own could set what the template cannot
 		if ($o.kind? | default "") == "ExternalSecret" and ($o.spec?.target?.manifest? | default null) != null { $why = ($why | append $"($id) sets spec.target.manifest, which a tenant's release leaves to the operator's store") }
 		if ($reserved | any {|r| $r.kind == ($o.kind? | default "") and $r.name == ($o.metadata?.name? | default "") }) { $why = ($why | append $"($id) is an object the provisioner or the engine owns") }

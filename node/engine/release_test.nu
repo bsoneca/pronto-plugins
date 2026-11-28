@@ -2485,6 +2485,11 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "the approved digest under another major", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database-base:17@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
 		{why: "a cnpg.io/podPatch annotation, with which the operator rewrites the instance pod", says: "which make the database operator rewrite the instance pod", objects: $"[{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\", annotations: {\"cnpg.io/podPatch\": \"[]\"}}, spec: {imageName: \"($approved)\"}}]"}
 		{why: "an ExternalSecret that takes the database's postgres Secret as a template source, copying its password into a Secret a workload may read", says: "as a template source, which hold the postgres superuser's password", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"x\", namespace: \"($ns)\"}, spec: {target: {name: \"t\", template: {templateFrom: [{secret: {name: \"game-db-postgres\"}}]}}}}]"}
+		{why: "an ExternalSecret that merges into the cluster's superuser Secret (PRONTO-2147)", says: "writes a Secret that holds a database's superuser password", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"game-db-superuser\", namespace: \"($ns)\"}, spec: {target: {creationPolicy: \"Merge\"}, dataFrom: [{sourceRef: {generatorRef: {kind: \"Password\", name: \"g\"}}}]}}]"}
+		{why: "an ExternalSecret that targets another Secret than its own name (PRONTO-2147)", says: "which is not its own name", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"x\", namespace: \"($ns)\"}, spec: {target: {name: \"game-db-postgres\", creationPolicy: \"Merge\"}}}]"}
+		{why: "an ExternalSecret that writes the database Secret with a password of its own choosing (PRONTO-2147)", says: "no reference to a generated key", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"game-db-postgres\", namespace: \"($ns)\"}, spec: {target: {template: {data: {username: \"postgres\", password: \"chosen\"}}}}}]"}
+		{why: "an ExternalSecret that writes another release's database Secret (PRONTO-2147)", says: "is not game-db-postgres", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"other-db-postgres\", namespace: \"($ns)\"}, spec: {}}]"}
+		{why: "a plain Secret named as the database's postgres Secret (PRONTO-2147)", says: "Secret/game-db-postgres is a name that holds a database's superuser password", objects: $"[{apiVersion: \"v1\", kind: \"Secret\", metadata: {name: \"game-db-postgres\", namespace: \"($ns)\"}}]"}
 		{why: "a command parameter", says: "sets the Postgres parameter archive_command", objects: (do $cluster_with $approved "postgresql: {parameters: {archive_command: \"curl evil\"}}")}
 		{why: "a restore_command parameter", says: "sets the Postgres parameter restore_command", objects: (do $cluster_with $approved "postgresql: {parameters: {restore_command: \"x\"}}")}
 		{why: "a preload library parameter", says: "sets the Postgres parameter shared_preload_libraries", objects: (do $cluster_with $approved "postgresql: {parameters: {shared_preload_libraries: \"evil\"}}")}
@@ -3293,15 +3298,22 @@ def test_a_tenants_externalsecret_reads_no_store [] {
 	assert (($cases.refused | columns | length) >= 5) "the cases of tests/externalsecret were not read"
 	for name in ($cases.refused | columns) {
 		let c = ($cases.refused | get $name)
-		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: game} ($kinds)")
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: app} ($kinds)")
 		assert ($r.exit_code != 0) $"an ExternalSecret that ($name) was not refused"
 		for says in $c.says { assert (has $r.stderr $says) $"($name): ($says) is not in ($r.stderr)" }
 	}
 	for name in ($cases.allowed | columns) {
 		let c = ($cases.allowed | get $name)
-		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: game} ($kinds)")
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: app} ($kinds)")
 		assert equal $r.exit_code 0 $"an ExternalSecret that ($name) was refused: ($r.stderr)"
 	}
+	# PRONTO-2147: a legacy Cluster's superuserSecret is a name only a live read gives (live_secrets): an ExternalSecret of that name is refused, as its own Owner too
+	let legacy = '{apiVersion: external-secrets.io/v1beta1, kind: ExternalSecret, metadata: {name: legacy-su, namespace: ns}, spec: {target: {creationPolicy: Owner}}}'
+	let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($legacy)] {namespace: ns, name: app} ($kinds) [] [legacy-su]")
+	assert ($r.exit_code != 0) "an ExternalSecret named as a live superuserSecret was not refused"
+	assert (has $r.stderr "writes a Secret that holds a database's superuser password") $r.stderr
+	let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($legacy)] {namespace: ns, name: app} ($kinds) [] []")
+	assert equal $r.exit_code 0 $"the same ExternalSecret, with no live superuserSecret of that name, was refused: ($r.stderr)"
 	rm -rf $w.dir
 }
 
