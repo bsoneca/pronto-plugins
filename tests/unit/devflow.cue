@@ -441,6 +441,8 @@ cases: {
 		{call: "devflow.newPending", args: [[{app: "a", flag: "x"}], ["pending:a/x", "pending:a/gone"]], expect: []},
 		{call: "devflow.newPending", args: [[{app: "a", flag: "x"}], ["pending:a/x"], "drift"], expect: [{app: "a", flag: "x"}], why: "a flag reported as pending, then flipped and not recorded, is a new report as drift"},
 		{call: "devflow.newPending", args: [[{app: "a", flag: "x"}], ["pending:a/x", "drift:a/x"], "drift"], expect: []},
+		{call: "devflow.pendingFlags", args: [[{app: "aprende", flags: {obmep: {default: false}}, live: {}, added: {}, cases: {obmep: null}}], [], "2026-11-22T12:00:00Z"], expect: [{app: "aprende", flag: "obmep", age: "?", note: "", cases: null}], why: "cases that could not be read are unknown, not none"},
+		{call: "devflow.pendingLine", args: [[{app: "aprende", flag: "obmep", age: "?", cases: null}]], expect: "pending flags: aprende/obmep (?, cases: ?)", why: "unknown cases read ?, never no"},
 		{call: "devflow.pendingLine", args: [[]], expect: "pending flags: none"},
 		{call: "devflow.unavailableLines", args: [[{app: "aprende", reason: "ofrep https://aprende.bsoneca.com geografia_6_9: 405"}, {app: "studio", reason: "cue export . in x: boom"}]], expect: ["pending flags: aprende unavailable (ofrep https://aprende.bsoneca.com geografia_6_9: 405)", "pending flags: studio unavailable (cue export . in x: boom)"], why: "an app whose flags cannot be read is its own line, so the others are still reported"},
 		{call: "devflow.unavailableLines", args: [[]], expect: []},

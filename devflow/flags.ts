@@ -99,7 +99,8 @@ async function exportOf<T>(dir: string, pkg: string, expr: string, run: Run): Pr
       continue;
     }
     // A tests folder with no `scenarios` or `cases` field has none; the app's own package says its flags, or the run fails.
-    if (pkg !== "." && /undefined field|incomplete/.test(r.err)) return null;
+    // Only the expression itself missing: an "undefined field" inside a value is a failure to evaluate (the `{}` stand-in above breaks aprende's scenarios), never "none" (PRONTO-89).
+    if (pkg !== "." && r.err.includes(`reference "${expr}" not found`)) return null;
     throw new Error(`cue export ${pkg} in ${dir}: ${r.err.trim().split("\n").pop()}`);
   }
 }
@@ -122,9 +123,15 @@ async function addedAt(dir: string, app: string, flag: string, run: Run): Promis
 }
 
 /** Whether a scenario (tests/scenarios, in `flags` or a step's `flag`) or a unit case (tests/unit, in `flags`) names each of `names`: what a flip runs, and what `pronto-flags push` refuses a flag without. */
-async function casesOf(dir: string, names: string[], run: Run): Promise<Record<string, boolean>> {
-  const scenarios = await exportOf<Entries>(dir, "tests/scenarios", "scenarios", run) ?? {};
-  const unit = await exportOf<Entries>(dir, "tests/unit", "cases", run) ?? {};
+async function casesOf(dir: string, names: string[], run: Run): Promise<Record<string, boolean | null>> {
+  let scenarios: Entries, unit: Entries;
+  try {
+    scenarios = await exportOf<Entries>(dir, "tests/scenarios", "scenarios", run) ?? {};
+    unit = await exportOf<Entries>(dir, "tests/unit", "cases", run) ?? {};
+  } catch {
+    // The cases cannot be read here (a spec that needs its generate step): unknown, never "no".
+    return Object.fromEntries(names.map((n) => [n, null]));
+  }
   const named = new Set<string>();
   for (const e of Object.values(scenarios)) for (const f of [...(e.flags ?? []), ...(e.steps ?? []).map((s) => s.flag ?? "")]) named.add(f);
   for (const e of Object.values(unit)) for (const f of e.flags ?? []) named.add(f);

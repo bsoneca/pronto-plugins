@@ -135,6 +135,14 @@ let found = (live cases $app premium)
 check (($found | str contains "buy") and ($found | str contains "shelf") and ($found | str contains "price") and not ($found | str contains "unrelated")) "cases: a flag's scenarios (flags, or a step's flag) and unit cases"
 let none = (live cases $app theme)
 check (not ($none | str contains "buy")) "cases: a flag nothing names has none"
+# A scenario that cannot be evaluated (a spec its generate step has not written) is an error, never a flag with no cases (PRONTO-89).
+'package scenarios
+#D: {a: 1}
+scenarios: broken: {flags: ["premium"], steps: [{n: #D.b}]}
+' | save $"($app)/tests/scenarios/broken.cue"
+let unreadable = (try { live cases $app premium; "read" } catch {|e| $e.msg })
+rm $"($app)/tests/scenarios/broken.cue"
+check ($unreadable | str contains "undefined field") "cases: a scenario that fails to evaluate is an error, not a flag with no cases"
 
 full-spec true "light"
 let n0 = (object | length)

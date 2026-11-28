@@ -671,7 +671,11 @@ def cue-dir [app: path, dir: string, expr: string] {
 	if not ($app | path join $dir | path exists) { return null }
 	let r = (do { cd $app; ^$env.SAYT_MISE_BIN exec -- cue export $"./($dir)" -e $expr --out json } | complete)
 	if $r.exit_code != 0 {
-		if ($r.stderr | str contains "undefined field") or ($r.stderr | str contains "not found") { return null }
+		# Only the expression itself missing means the folder has none. An "undefined field" inside a value is a failure to evaluate:
+		# read as "none" it made every flag of an app whose spec needs `generate` (aprende's spec/dados/spec.json, gitignored) look
+		# case-less (PRONTO-89).
+		if ($r.stderr | str contains $"reference \"($expr)\" not found") { return null }
+		if ($r.stderr | str contains "@embed: open") { error make {msg: $"cue export ./($dir) -e ($expr) in ($app) reads a file the app's generate writes: run `./saytw generate` in ($app) first \(($r.stderr | lines | where {|l| $l | str contains '@embed' } | first | str trim)\)"} }
 		error make {msg: $"cue export ./($dir) -e ($expr) in ($app): ($r.stderr | str trim)"}
 	}
 	$r.stdout | from json
