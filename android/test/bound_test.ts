@@ -131,3 +131,40 @@ Deno.test("a bound hatch's stylesheet is linked while it is mounted", async () =
   assertEquals(document.querySelector("link[data-hatch-css=probe]"), null);
   await settle();
 });
+
+// A module that shows the flag it is given: what the door's flags make of a view.
+const flagged = {
+  init: () => ({}),
+  view: (_s: unknown, _r: unknown, ctx: { flags: Record<string, boolean> }) => ({
+    tag: "p", key: "flag", attrs: { id: "flag" }, text: ctx.flags.lobby === true ? "on" : "off",
+  }),
+};
+
+Deno.test("the door's flags reach a bound hatch's ctx after the first frame, and the view is drawn again", async () => {
+  const { screen } = screenOf();
+  const stop = bound("probe", binding, flagged, { ...quiet(), flags: () => Promise.resolve({ lobby: true }) })(screen, {});
+  assertEquals(screen.querySelector("#flag").textContent, "off", "the first frame has no flags");
+  await settle();
+  assertEquals(screen.querySelector("#flag").textContent, "on", "drawn again when the flags answered");
+  stop();
+});
+
+Deno.test("a door that does not answer is a fault, never every flag off silently", async () => {
+  const { screen } = screenOf();
+  const q = quiet();
+  const stop = bound("probe", binding, flagged, { ...q, flags: () => Promise.reject(new Error("flags could not be read: 503")) })(screen, {});
+  await settle();
+  assert(q.said.some((m) => m.includes("PRONTO FAULT hatch probe: flags could not be read: 503")), q.said.join("\n"));
+  assertEquals(screen.querySelector("#flag").textContent, "off");
+  stop();
+});
+
+Deno.test("a hatch stopped before the flags answer is not drawn again", async () => {
+  const { screen } = screenOf();
+  let answer: (f: Record<string, boolean>) => void = () => {};
+  const stop = bound("probe", binding, flagged, { ...quiet(), flags: () => new Promise((ok) => { answer = ok; }) })(screen, {});
+  stop();
+  answer({ lobby: true });
+  await settle();
+  assertEquals(screen.querySelector("#hatch-probe"), null);
+});
