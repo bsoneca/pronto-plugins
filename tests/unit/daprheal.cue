@@ -62,7 +62,7 @@ cases: "a workload rolled longer ago than the cooldown with a pod still bare, of
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "an old bare pod: the rollout did not replace it (OnDelete, paused, a stuck ordered StatefulSet, a Pending pod): another roll would not either, and it must not stay green"},
-		{pick: ["err"], matches: "past the cooldown of 30 minutes, a pod it covered or made is still without its sidecar: not rolled again"},
+		{pick: ["err"], matches: "past the cooldown of 30 minutes, a pod it covered is still without its sidecar: not rolled again"},
 		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 600})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: []}, why: "a pod created after the roll: the injector injects nothing for it"},
 	]
 }
@@ -174,7 +174,7 @@ cases: "bare pods that none of the last attempt's covered are a new incident: th
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [(_bare & {name: "new-pod", ageSec: 300})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["gone-pod"]}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}, why: "made 5 minutes ago, after the 15 minutes ago the attempt's cooldown ended (the mark is 45 minutes old, the cooldown 30): not the roll's product, and the pod the mark covered is gone"},
-		{pick: ["out"], matches: "a new incident"},
+		{pick: ["out"], matches: "a new attempt"},
 		{call: "daprheal.run", args: [{pods: [(_bare & {name: "new-pod", ageSec: 120})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, markPods: {"aprende.Deployment.aprende-flagd": ["gone-pod"]}}], holds: {code: 0, rolled: []}, why: "within the cooldown a new incident waits too"},
 		{call: "daprheal.run", args: [{pods: [_bare, (_bare & {name: "new-pod"})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["aprende-flagd-6898744c57-m6m77"]}}], holds: {code: 1, rolled: []}, why: "a pod it covered is still bare: the same incident, an error, not another roll"},
 	]
@@ -241,11 +241,13 @@ cases: "a forged line of the inventory cannot point a restart outside the swept 
 	]
 }
 
-cases: "the pods a roll itself makes, still bare, are the same incident: an error, not a roll every cooldown for ever": {
+cases: "a pod the attempt covered, still bare past the cooldown, is an error, not a roll every cooldown; a pod it did not cover is a new attempt, whatever its age against the first cooldown": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [(_bare & {name: "replacement", ageSec: 1200})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["old-pod"]}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "made 20 minutes ago, 25 minutes after the attempt, inside its cooldown: the injector injects nothing for the replacement either"},
-		{pick: ["err"], matches: "a pod it covered or made is still without its sidecar"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "the pod the attempt covered is still bare: the roll landed and did not fix it"},
+		{pick: ["err"], matches: "a pod it covered is still without its sidecar"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "replacement", ageSec: 1200})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["old-pod"]}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}, why: "a repaired pod evicted and replaced bare 20 minutes ago, 25 minutes after the first attempt (inside its cooldown): with the cooldown over and the injector ready it is repaired, not suppressed for ever"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "replacement", ageSec: 1200})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["old-pod"]}, injector: ""}], holds: {code: 1, rolled: []}, why: "the injector must be ready: a restart while it is down only makes more bare pods"},
 	]
 }
 
@@ -318,6 +320,21 @@ cases: "a workload that has no bare pod but is still rolling out keeps its mark;
 		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}}], holds: {code: 0, marked: []}, why: "ready and updated as wanted: recovered"},
 		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, rollout: {"aprende/Deployment/aprende-flagd": "gone"}}], holds: {code: 0, marked: []}, why: "the workload is gone: its mark goes"},
 		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, rollout: {"aprende/Deployment/aprende-flagd": "unreadable"}}], holds: {code: 1, marked: ["aprende.Deployment.aprende-flagd"]}},
+	]
+}
+
+cases: "a mark of a live workload goes only when the pods read now are the wanted number, each with daprd": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": ["Running|flagd,daprd,", "Running|flagd,"]}}], holds: {code: 0, marked: ["aprende.Deployment.aprende-flagd"]}, why: "the controller's counts say Ready, but a replacement the first pod list never held runs without daprd"},
+		{pick: ["out"], matches: "1 without daprd, in the pods read now: its mark stays"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": ["deleting|flagd,daprd,", "deleting|flagd,daprd,"]}}], holds: {code: 0, marked: ["aprende.Deployment.aprende-flagd"]}, why: "only terminating pods: the replacements are not observed"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": ["Running|flagd,daprd,"]}}], holds: {code: 0, marked: ["aprende.Deployment.aprende-flagd"]}, why: "one live pod of two wanted"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": "unreadable"}}], holds: {code: 1, marked: ["aprende.Deployment.aprende-flagd"]}, why: "a pod list that cannot be read keeps the mark and fails the run"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": "expressions"}}], holds: {code: 1, marked: ["aprende.Deployment.aprende-flagd"]}, why: "a selector the sweep cannot turn into a label query is not confirmation"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": ["Running|flagd,", "Running|init,flagd,daprd,"]}}], holds: {code: 0, marked: ["aprende.Deployment.aprende-flagd"]}, why: "one of the two still has no daprd"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": ["Running|flagd,daprd,", "Running|flagd,", "Succeeded|job,"]}}], holds: {code: 0, marked: ["aprende.Deployment.aprende-flagd"]}, why: "a finished pod is not counted, so the two live ones are one bare"},
+		{call: "daprheal.run", args: [{pods: [], marks: {"aprende.Deployment.aprende-flagd": 5}, live: {"aprende/Deployment/aprende-flagd": ["Running|flagd,daprd,", "Running|flagd,daprd,", "deleting|flagd,"]}}], holds: {code: 0, marked: []}, why: "two live pods with daprd and a terminating one: recovered"},
 	]
 }
 
