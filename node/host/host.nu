@@ -56,47 +56,33 @@ def lines [text: string]: nothing -> string { ($text | str trim --right --char "
 # The values must be what #Host allows: they are written into a script's settings and a unit file, so a hand-edited
 # json must not carry a quote or a newline into them. Only the section this module sets is vetted (a repository's host
 # holds others of its own); the schema is the one beside this file.
-export def vet [host: record] {
-	let f = (mktemp --tmpdir node-host-vet-XXXXXX.json)
-	$host.dockerGC | to json | save --force --raw $f
-	let r = (try { do { ^cue vet -c ($here | path join schema host.cue) $f -d '#DockerGC' } | complete } catch {
-		rm -f $f
+# `value` vetted against the schema's `def`, as JSON on cue's standard input: no temporary file, so an interrupt leaves none (a section
+# holds the channel's URL, which is its key). Returns the error text, URLs redacted (cue echoes a value it refuses), or "" when it holds.
+def vet-section [value: any, def: string]: nothing -> string {
+	let r = (try { $value | to json | do { ^cue vet -c ($here | path join schema host.cue) json: - -d $def } | complete } catch {
 		error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
 	})
-	rm -f $f
-	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
+	if $r.exit_code == 0 { return "" }
+	$r.stderr | str trim | str replace --all --regex 'https://[^"\s]*' "https://<redacted>"
+}
+
+export def vet [host: record] {
+	let r = (vet-section $host.dockerGC '#DockerGC')
+	if $r != "" { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r)"} }
 	if ($host.daprHeal? != null) {
-		let h = (mktemp --tmpdir node-host-vet-XXXXXX.json)
-		$host.daprHeal | to json | save --force --raw $h
-		let v = (try { do { ^cue vet -c ($here | path join schema host.cue) $h -d '#DaprHeal' } | complete } catch {
-			rm -f $h
-			error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
-		})
-		rm -f $h
-		if $v.exit_code != 0 { error make {msg: $"node-host: the host's daprHeal is not what #Host allows: ($v.stderr | str trim)"} }
+		let v = (vet-section $host.daprHeal '#DaprHeal')
+		if $v != "" { error make {msg: $"node-host: the host's daprHeal is not what #Host allows: ($v)"} }
 	}
 	# The alarm must ring before the kubelet evicts: #Host holds that across the two sections, so both are vetted whole when both are set.
 	if ($host.kubelet? != null) and ($host.diskWatch? != null) {
-		let both = (mktemp --tmpdir node-host-vet-XXXXXX.json)
-		{dockerGC: $host.dockerGC, kubelet: $host.kubelet, diskWatch: $host.diskWatch} | to json | save --force --raw $both
-		let b = (try { do { ^cue vet -c ($here | path join schema host.cue) $both -d '#Host' } | complete } catch {
-			rm -f $both
-			error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
-		})
-		rm -f $both
-		if $b.exit_code != 0 { error make {msg: $"node-host: the host's kubelet and diskWatch are not what #Host allows together: ($b.stderr | str trim)"} }
+		let b = (vet-section {dockerGC: $host.dockerGC, kubelet: $host.kubelet, diskWatch: $host.diskWatch} '#Host')
+		if $b != "" { error make {msg: $"node-host: the host's kubelet and diskWatch are not what #Host allows together: ($b)"} }
 	}
 	for sec in [[key def]; ["diskWatch" "#DiskWatch"] ["critical" "#Critical"]] {
 		let v = ($host | get --optional $sec.key)
 		if $v == null { continue }
-		let f = (mktemp --tmpdir node-host-vet-XXXXXX.json)
-		$v | to json | save --force --raw $f
-		let r = (try { do { ^cue vet -c ($here | path join schema host.cue) $f -d $sec.def } | complete } catch {
-			rm -f $f
-			error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
-		})
-		rm -f $f
-		if $r.exit_code != 0 { error make {msg: $"node-host: the host's ($sec.key) is not what #Host allows: ($r.stderr | str trim)"} }
+		let e = (vet-section $v $sec.def)
+		if $e != "" { error make {msg: $"node-host: the host's ($sec.key) is not what #Host allows: ($e)"} }
 	}
 	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is status 2 there, which the cleanup loop would
 	# read as "no tag matches" and keep every image. It is checked here by the operator's bash, not the node's (the node's
