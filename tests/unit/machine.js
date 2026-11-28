@@ -642,6 +642,27 @@ export async function cueMemDefaults() {
   const GiB = 2 ** 30;
   return { g128: cueMemDefault(128 * GiB), g36: cueMemDefault(36 * GiB), g8: cueMemDefault(8 * GiB), unknown: cueMemDefault(undefined), zero: cueMemDefault(0), nan: cueMemDefault(NaN) };
 }
+// One pool for the machine (PRONTO-774): the warning for a STACK_POOL that is not the default, and the install's refusal of a shell file that sets one.
+export async function onePool() {
+  const { poolWarning } = await import("../../harness/files/tests/slot.ts");
+  const tmp = await sh("mktemp -d");
+  try {
+    await Deno.writeTextFile(`${tmp}/.zshenv`, "export PATH=$PATH\ntypeset -x STACK_POOL=$HOME/.cache/pronto-stacks\nexport A=1 STACK_BUDGET=12\n");
+    // Nothing of the real machine: a stub launchctl, a mise config in the temp home, and no inherited environment.
+    await Deno.mkdir(`${tmp}/stub`);
+    await Deno.writeTextFile(`${tmp}/stub/launchctl`, "#!/bin/sh\nexit 0\n");
+    await Deno.chmod(`${tmp}/stub/launchctl`, 0o755);
+    const o = await new Deno.Command("sh", { args: [new URL("../../machine/install.sh", import.meta.url).pathname], clearEnv: true, env: { HOME: tmp, MISE_GLOBAL_CONFIG_FILE: `${tmp}/mise.toml`, PATH: `${tmp}/stub:/usr/bin:/bin` }, stdout: "piped", stderr: "piped" }).output();
+    const err = new TextDecoder().decode(o.stderr);
+    let installed = true;
+    try { await Deno.stat(`${tmp}/.local`); } catch { installed = false; }
+    try { await Deno.stat(`${tmp}/mise.toml`); installed = true; } catch { /* untouched */ }
+    return {
+      unset: poolWarning(undefined), empty: poolWarning(""), runner: poolWarning("/tmp/pronto-stacks-ci", "/tmp/pronto-stacks"), same: poolWarning("/tmp/pronto-stacks"), other: poolWarning("/Users/x/.cache/pronto-stacks"),
+      code: o.code, names: /\.zshenv/.test(err) && /STACK_POOL=/.test(err) && /STACK_BUDGET=/.test(err), installed,
+    };
+  } finally { await Deno.remove(tmp, { recursive: true }); }
+}
 // The pool's lock is reclaimed after a minute only once its owner is verified gone: a live owner's stays (the call waits, bounded), a dead owner's
 // and one with no owner file (an older copy made it) are reclaimed.
 export async function choosingStale() {

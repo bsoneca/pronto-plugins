@@ -186,7 +186,20 @@
 // Run inside the app's toolchain (mise exec), which has process-compose, as the verbs are.
 
 const app = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
+const defaultPool = "/tmp/pronto-stacks";
+const pool = Deno.env.get("STACK_POOL") || defaultPool;
+// One pool for the machine (PRONTO-774): a STACK_POOL that is not the default is a second pool, whose
+// holders no claim in the default pool sees, so admission counts about half the load. The warning, or
+// null when the pool is the default (an empty STACK_POOL reads as the default), or when STACK_HOLD_POOL is set:
+// a pr account's runner has its own pool on purpose and reads the applier's holds through it (runners/setups.cue).
+export const poolWarning = (set: string | undefined, hold?: string): string | null =>
+  !set || set === defaultPool || hold ? null
+    : `STACK_POOL is ${set}, not ${defaultPool}: its holders are invisible to every claim in the default pool, so admission sees only part of the load; unset STACK_POOL (and STACK_BUDGET) in the shell's startup files`;
+let poolWarned = false;
+const warnPool = () => {
+  const w = poolWarning(Deno.env.get("STACK_POOL"), Deno.env.get("STACK_HOLD_POOL"));
+  if (w && !poolWarned) { poolWarned = true; say(`warning: ${w}`); }
+};
 const budget = Number(Deno.env.get("STACK_BUDGET") ?? Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
 const asked = Number(Deno.env.get("STACK_SLOT") ?? "0");
 // The cue memory budget (GB) and cores (PRONTO-870): what the evaluations claimed through --mem and --cores-claim may add up to.
@@ -1877,7 +1890,7 @@ const orphaned = async () => {
   const rec = m.recordOf(m.readRecords(), Deno.pid, superpid, superstart);
   if (rec) {
     await m.stopMembers(sys, rec);
-    try { Deno.removeSync((Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks") + "/runs/" + rec.rootpid + "-" + rec.rootstart); } catch { /* gone */ }
+    try { Deno.removeSync((Deno.env.get("STACK_POOL") || "/tmp/pronto-stacks") + "/runs/" + rec.rootpid + "-" + rec.rootstart); } catch { /* gone */ }
   }
   try { Deno.removeSync(dir, { recursive: true }); } catch { /* gone */ }
 };
@@ -2597,6 +2610,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
   const split = Deno.args.indexOf("--");
   const opts = Deno.args.slice(0, split < 0 ? Deno.args.length : split);
   const cmd = split < 0 ? [] : Deno.args.slice(split + 1);
+  warnPool();
   const opt = (name: string) => opts[opts.indexOf(name) + 1];
   // --mem-claim is --mem by its other name (the claim, in GB; either makes the job a cue claim).
   const mem = opts.includes("--mem-claim") ? Number(opt("--mem-claim")) : opts.includes("--mem") ? Number(opt("--mem")) : 0;
@@ -2786,6 +2800,7 @@ if (import.meta.main) {
     Deno.exit(0);
   }
   if (Deno.args[0] === "status" || Deno.args[0] === "renew") {
+    warnPool();
     // renew writes deadlines into the pool: only into one that is ours (PRONTO-762), as claim checks.
     if (Deno.args[0] === "renew") requireOwnDir(pool);
     const asked = Deno.args[1] === undefined ? 0 : Number(Deno.args[1]);
@@ -2817,6 +2832,7 @@ if (import.meta.main) {
     if (Deno.args[0] === "renew" && !found) { console.error("no live launch with a deadline" + (asked ? ` for ${asked}` : "")); Deno.exit(1); }
     Deno.exit(0);
   }
+  warnPool();
   const args = launchArgs(Deno.args);
   // integrate@host: generate and build here, as its own --generate would, then its suites in the slot's
   // copy (`integrating`): a generate there would write the literal ports back.

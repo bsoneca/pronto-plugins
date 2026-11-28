@@ -63,7 +63,7 @@ admitted while the machine's one-minute load is under `STACK_HOLD_LOAD`.
 
 | Name | Meaning | Default |
 | --- | --- | --- |
-| `STACK_POOL` | the pool directory, shared by every checkout on the machine | `/tmp/pronto-stacks` |
+| `STACK_POOL` | the pool directory, shared by every checkout on the machine; leave it unset on the owner's account: a second pool is invisible to the first (PRONTO-774), so `slot.ts` warns of it and `pronto-machine install` refuses a shell file that sets it, even to the default path spelled out. A pr runner's own pool (`/tmp/pronto-stacks-<user>`, read with `STACK_HOLD_POOL`) is on purpose and draws no warning | `/tmp/pronto-stacks` |
 | `STACK_BUDGET` | the weight budget | cores minus `STACK_RESERVE` |
 | `STACK_RESERVE` | cores kept for what runs outside the pool | 3 |
 | `STACK_WEIGHT`, `--weight <n>` | a job's weight | by verb |

@@ -982,7 +982,7 @@ try {
     if (wantSlot) active("slot");
     else if (own && !dry) { step(cron.steps.slot); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
     // The slot is taken once a live slot of the pool names this rehearsal as its owner.
-    const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
+    const pool = Deno.env.get("STACK_POOL") || "/tmp/pronto-stacks";
     const look = setInterval(() => {
       if (got) return;
       for (const e of (() => { try { return [...Deno.readDirSync(pool)]; } catch { return []; } })()) {

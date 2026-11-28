@@ -758,6 +758,28 @@ cases: "a top-level cue claim reserves behind a weighted ticket blocked on stack
 		{get: "nestedAdmitted", expect: true},
 	]
 }
+cases: "one pool for the machine: slot.ts warns of a STACK_POOL that is not the default, and install refuses a shell file that sets one (PRONTO-774)": {
+	suite: "machine"
+	steps: [
+		{call: "machine.onePool"},
+		{keep: "r"},
+		{get: "unset", expect: null},
+		{use: "r"},
+		{get: "empty", expect: null, why: "an empty STACK_POOL reads as the default, as slot.ts reads it"},
+		{use: "r"},
+		{get: "runner", expect: null, why: "a pr runner's own pool beside STACK_HOLD_POOL is on purpose (runners/setups.cue)"},
+		{use: "r"},
+		{get: "same", expect: null, why: "the default pool, spelt out, is no second pool"},
+		{use: "r"},
+		{get: "other", matches: "^STACK_POOL is /Users/x/\\.cache/pronto-stacks, not /tmp/pronto-stacks", why: "a second pool is named, with the default"},
+		{use: "r"},
+		{get: "code", expect: 1, why: "an install over a .zshenv that exports STACK_POOL stops, whatever it exports it as"},
+		{use: "r"},
+		{get: "names", expect: true, why: "it names the file and both lines"},
+		{use: "r"},
+		{get: "installed", expect: false, why: "and puts nothing in place"},
+	]
+}
 cases: "the cue memory budget defaults to half the machine's memory, and to one evaluation at a time where that cannot be read": {
 	suite: "machine"
 	steps: [
