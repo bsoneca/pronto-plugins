@@ -69,6 +69,45 @@ has() {
   case $rc in 0) return 0 ;; 1) return 1 ;; *) echo "dapr-heal: grep failed ($rc): the sweep stops before it rolls or deletes anything" >&2; exit 1 ;; esac
 }
 
+# live_recovered NS OWNER WANT: whether the pods the workload's selector names, read now, are WANT live ones (not terminating, not finished) and each
+# runs a daprd container. Anything else (fewer, a bare one, only terminating ones, a selector that cannot be used) keeps the mark; a read that
+# fails also fails the run.
+live_recovered() {
+  local ns=$1 owner=$2 want=$3 sel wuid out phase containers powner nlive=0 nbare=0 kind=${2%%/*}
+  if ! sel=$(k -n "$ns" get "$owner" -o go-template='{{.metadata.uid}}|{{if .spec.selector.matchExpressions}}(expressions){{else}}{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}{{end}}'); then
+    echo "dapr-heal: $ns/$owner's selector could not be read to confirm it recovered: its mark stays" >&2; failed=1; return 1
+  fi
+  wuid=${sel%%|*}
+  sel=${sel#*|}
+  sel=${sel%,}
+  if ! [[ $sel =~ ^[A-Za-z0-9_./=,-]+$ ]]; then
+    echo "dapr-heal: $ns/$owner's selector '$sel' cannot be turned into a pod list: its mark stays" >&2; failed=1; return 1
+  fi
+  if ! out=$(k -n "$ns" get pods -l "$sel" -o go-template='{{range .items}}{{if .metadata.deletionTimestamp}}deleting{{else}}{{.status.phase}}{{end}}|{{range .spec.containers}}{{.name}},{{end}}{{range .spec.initContainers}}{{.name}},{{end}}|{{range .metadata.ownerReferences}}{{if .controller}}{{.kind}}@{{.uid}}{{end}}{{end}}{{"\n"}}{{end}}'); then
+    echo "dapr-heal: the pods of $ns/$owner could not be read to confirm it recovered: its mark stays" >&2; failed=1; return 1
+  fi
+  while IFS='|' read -r phase containers powner; do
+    [ -n "$phase" ] || continue
+    case "$phase" in deleting | Succeeded | Failed) continue ;; esac
+    # Only the pods this workload owns: a StatefulSet's and a DaemonSet's by the controller reference's uid, a Deployment's by a ReplicaSet owner
+    # (the ReplicaSets' own Deployment is not read here: more of them than wanted is an error below). A pod of another workload whose labels
+    # the selector also matches is not counted.
+    if [ "$kind" = Deployment ]; then case "$powner" in ReplicaSet@*) ;; *) continue ;; esac
+    elif [ "$powner" != "$kind@$wuid" ]; then continue; fi
+    nlive=$((nlive + 1))
+    case ",$containers" in *,daprd,*) ;; *) nbare=$((nbare + 1)) ;; esac
+  done <<<"$out"
+  if [ "$nlive" -gt "$want" ]; then
+    echo "dapr-heal: $ns/$owner has $nlive live pod(s) its selector names, $want wanted (another workload with an overlapping selector, or a rollout that has not ended): its mark stays and the run fails" >&2
+    failed=1
+    return 1
+  fi
+  if [ "$nlive" != "$want" ] || [ "$nbare" != 0 ]; then
+    echo "dapr-heal: $ns/$owner has $nlive live pod(s) of $want wanted, $nbare without daprd, in the pods read now: its mark stays"
+    return 1
+  fi
+}
+
 # A mark is removed when its workload is confirmed recovered or gone, never because a sweep saw no bare pod of it: during a Recreate rollout the
 # old pod is terminating (not counted) and its replacement does not exist yet. `prune_marks PRESENT` goes over the marks of workloads not in
 # PRESENT (the ones with a bare pod): a workload that has rolled out its template (observed generation current, ready and updated replicas as
@@ -87,7 +126,7 @@ prune_marks() {
     esac
     owner="$kind/$name"
     rc=0
-    out=$(k -n "$ns" get "$owner" -o jsonpath='{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.readyReplicas}|{.status.updatedReplicas}|{.status.desiredNumberScheduled}|{.status.numberReady}|{.status.updatedNumberScheduled}' 2>"$errf") || rc=$?
+    out=$(k -n "$ns" get "$owner" -o jsonpath='{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.readyReplicas}|{.status.updatedReplicas}|{.status.desiredNumberScheduled}|{.status.numberReady}|{.status.updatedNumberScheduled}|{.status.replicas}|{.status.currentNumberScheduled}' 2>"$errf") || rc=$?
     if [ "$rc" -ne 0 ]; then
       if ! grep -q NotFound "$errf"; then
         echo "dapr-heal: $ns/$owner could not be read to confirm it recovered: its mark stays" >&2
@@ -95,13 +134,17 @@ prune_marks() {
         continue
       fi
     else
-      local gen obs want ready upd desired nready updsched
-      IFS='|' read -r gen obs want ready upd desired nready updsched <<<"$out"
-      if [ "$kind" = DaemonSet ]; then want=${desired:-0}; ready=${nready:-0}; upd=${updsched:-0}; fi
-      if [ "${obs:-}" != "${gen:-}" ] || [ "${ready:-0}" != "${want:-0}" ] || [ "${upd:-0}" != "${want:-0}" ]; then
+      local gen obs want ready upd desired nready updsched total cur
+      IFS='|' read -r gen obs want ready upd desired nready updsched total cur <<<"$out"
+      if [ "$kind" = DaemonSet ]; then want=${desired:-0}; ready=${nready:-0}; upd=${updsched:-0}; total=${cur:-0}; fi
+      # status.replicas counts the old pods too: a surge (3 of 2 wanted) is a rollout still going, though ready and updated are as wanted.
+      if [ "${obs:-}" != "${gen:-}" ] || [ "${ready:-0}" != "${want:-0}" ] || [ "${upd:-0}" != "${want:-0}" ] || [ "${total:-0}" != "${want:-0}" ]; then
         echo "dapr-heal: $ns/$owner has no bare pod now but is still rolling out (generation ${gen:-?}, observed ${obs:-?}, ready ${ready:-0} of ${want:-0}): its mark stays"
         continue
       fi
+      # The controller's counts and the pod list come from separate reads, and a replacement can be Ready with no daprd that the earlier list did
+      # not hold: the mark goes only when the workload's own pods, read now, are exactly the wanted number of live ones and all run daprd.
+      if ! live_recovered "$ns" "$owner" "${want:-0}"; then continue; fi
     fi
     rm -f "$mark" || { echo "dapr-heal: the mark $mark of $ns/$owner could not be removed" >&2; failed=1; }
   done
@@ -219,11 +262,13 @@ attempt_note='pronto.dev/dapr-heal-attempt'
 patch_id() { # ns owner id: the generation after the patch, on stdout
   k -n "$1" patch "$2" --type=merge -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"$attempt_note\":\"$3\"}}}}}" -o 'jsonpath={.metadata.generation}'
 }
-# write_mark ID PODS TIME GEN: the mark of the workload being handled ($mark), to a dot-named temporary no workload can have, flushed, renamed over
-# the mark and the folder flushed: a power cut must not leave a mark that is empty or half there. GEN is empty until the attempt is acknowledged.
+# write_mark ID PODS TIME GEN ATTEMPTS: the mark of the workload being handled ($mark), to a dot-named temporary no workload can have, flushed, renamed over
+# the mark and the folder flushed: a power cut must not leave a mark that is empty or half there. GEN is empty until the attempt is acknowledged. ATTEMPTS is how many rolls this
+# incident has had (the same generation, no prune between): the run fails instead of rolling a third time.
 write_mark() {
   local tmp="$state/.tmp.$$"
-  if { printf 'attempt=%s\npods=%s\ntime=%s\n' "$1" "$2" "$3"; [ -z "$4" ] || printf 'generation=%s\n' "$4"; } >"$tmp" && flush "$tmp" && mv -f "$tmp" "$mark" && flush "$state"; then return 0; fi
+  # Every write must succeed: the optional generation line is joined with &&, so a failed first printf is the group's status, never the empty test.
+  if { printf 'attempt=%s\npods=%s\ntime=%s\nattempts=%s\n' "$1" "$2" "$3" "${5:-1}" && { [ -z "$4" ] || printf 'generation=%s\n' "$4"; }; } >"$tmp" && flush "$tmp" && mv -f "$tmp" "$mark" && flush "$state"; then return 0; fi
   rm -f "$tmp" 2>/dev/null || true
   return 1
 }
@@ -263,10 +308,18 @@ while IFS='|' read -r ns owner ouid; do
     continue
   fi
   uids=$(while read -r u _; do printf '%s ' "$u"; done <<<"$podlist")
+  attempts=1
   if [ -e "$mark" ]; then
     # A mark that cannot be read is no mark that can be dropped: the workload is left alone and the run fails.
-    if ! mid=$(sed -n 's/^attempt=//p' "$mark") || ! mpods=$(sed -n 's/^pods=//p' "$mark") || ! mgen=$(sed -n 's/^generation=//p' "$mark") || ! mtimev=$(sed -n 's/^time=//p' "$mark"); then
+    if ! mid=$(sed -n 's/^attempt=//p' "$mark") || ! mpods=$(sed -n 's/^pods=//p' "$mark") || ! mgen=$(sed -n 's/^generation=//p' "$mark") || ! mtimev=$(sed -n 's/^time=//p' "$mark") || ! mattempts=$(sed -n 's/^attempts=//p' "$mark"); then
       echo "dapr-heal: the mark $mark of $ns/$owner could not be read: not rolled" >&2
+      failed=1
+      continue
+    fi
+    # How many rolls the incident has had; a mark of an older format has had one.
+    mattempts=${mattempts:-1}
+    if ! [[ $mattempts =~ ^[0-9]+$ ]]; then
+      echo "dapr-heal: the mark $mark of $ns/$owner holds an attempt count that is not a number ('$mattempts'): not rolled" >&2
       failed=1
       continue
     fi
@@ -296,7 +349,7 @@ while IFS='|' read -r ns owner ouid; do
       # mark and the patch. The same patch is sent again, with the same id, whatever the cooldown says; its answer acknowledges it.
       if [ "$dry" = 1 ]; then echo "dapr-heal: would send $ns/$owner's attempt $mid again (it is not on the workload)"; continue; fi
       if gen=$(patch_id "$ns" "$owner" "$mid" 2>"$state.err.$$"); then
-        if write_mark "$mid" "$mpods" "$now" "$gen"; then
+        if write_mark "$mid" "$mpods" "$now" "$gen" "$mattempts"; then
           echo "dapr-heal: rolled $ns/$owner: attempt $mid had not landed and was sent again"
         else
           echo "dapr-heal: attempt $mid was sent again to $ns/$owner, but its mark $mark could not be written" >&2
@@ -313,7 +366,7 @@ while IFS='|' read -r ns owner ouid; do
       # generation) is acknowledged now, at the generation the workload has.
       if [ -z "$mgen" ]; then
         mgen=$lgen
-        if [ "$dry" != 1 ] && ! write_mark "$mid" "$mpods" "$mtimev" "$mgen"; then
+        if [ "$dry" != 1 ] && ! write_mark "$mid" "$mpods" "$mtimev" "$mgen" "$mattempts"; then
           echo "dapr-heal: the attempt $mid of $ns/$owner landed, but its mark $mark could not be written: not rolled" >&2
           failed=1
           continue
@@ -328,20 +381,31 @@ while IFS='|' read -r ns owner ouid; do
         # not the roll's replacements, so they are a new incident whatever their age and annotation, and get an attempt.
         echo "dapr-heal: $ns/$owner's template changed since its last attempt (generation $mgen, now $lgen): its bare pods are a new incident"
       else
-        # Same template. A bare pod the attempt covered, or made after it and before the end of its cooldown (the roll's own replacement), is
-        # still bare: the roll landed and did not fix it (the injector injects nothing for it, or the rollout is stuck: OnDelete, paused, an
-        # ordered StatefulSet, a Pending pod). Another would not either: it is said and the run fails until someone looks, and the mark stays.
+        # Same template, past the cooldown. A bare pod the attempt covered is still bare: the roll landed and did not fix it (the injector injects
+        # nothing for it, or the rollout is stuck: OnDelete, paused, an ordered StatefulSet, a Pending pod). Another roll would not either: it is
+        # said and the run fails until someone looks, and the mark stays. Any other bare pod is one the injector missed after the attempt (the
+        # injector is ready: it was read above), a repaired pod's replacement or a roll's own: the cooldown only bounds how often a workload is
+        # restarted, never a pod's age against a fixed time, so it gets an attempt of its own.
         persists=0
-        while read -r u c; do
+        while read -r u _; do
           [ -n "$u" ] || continue
-          case " $mpods " in *" $u "*) persists=1 ;; *) if [ "$c" -le "$cooldown_end" ]; then persists=1; fi ;; esac
+          case " $mpods " in *" $u "*) persists=1 ;; esac
         done <<<"$podlist"
         if [ "$persists" = 1 ]; then
-          echo "dapr-heal: $ns/$owner was rolled and, past the cooldown of $COOLDOWN_MINUTES minutes, a pod it covered or made is still without its sidecar: not rolled again" >&2
+          echo "dapr-heal: $ns/$owner was rolled and, past the cooldown of $COOLDOWN_MINUTES minutes, a pod it covered is still without its sidecar: not rolled again" >&2
           failed=1
           continue
         fi
-        echo "dapr-heal: $ns/$owner has new bare pods, made after its last attempt's cooldown and none covered by it: a new incident"
+        # The roll's own replacements are not in the mark (it lists the pods that existed before the patch), so an injector that is ready and
+        # still injects nothing (a webhook or certificate broken, failurePolicy Ignore) would be rolled every cooldown for ever: a second roll of
+        # one incident is the last, and the third is an error until someone looks.
+        if [ "$mattempts" -ge 2 ]; then
+          echo "dapr-heal: $ns/$owner was rolled $mattempts times for this incident (generation $mgen) and a pod of it is still without its sidecar: not rolled again" >&2
+          failed=1
+          continue
+        fi
+        attempts=$((mattempts + 1))
+        echo "dapr-heal: $ns/$owner has bare pods its last attempt did not cover, and its cooldown is over: attempt $attempts"
       fi
     fi
   fi
@@ -349,14 +413,14 @@ while IFS='|' read -r ns owner ouid; do
   # The mark is written before the patch is sent: a state folder that cannot be written must not leave a restart nothing remembers (every sweep
   # would send it again). The patch's answer then acknowledges it.
   id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  if ! write_mark "$id" "$uids" "$now" ""; then
+  if ! write_mark "$id" "$uids" "$now" "" "$attempts"; then
     echo "dapr-heal: $ns/$owner: the mark $mark cannot be written: not rolled" >&2
     failed=1
     continue
   fi
   if gen=$(patch_id "$ns" "$owner" "$id" 2>"$state.err.$$"); then
     echo "dapr-heal: rolled $ns/$owner: a pod of it ran without its Dapr sidecar (attempt $id)"
-    if ! write_mark "$id" "$uids" "$now" "$gen"; then
+    if ! write_mark "$id" "$uids" "$now" "$gen" "$attempts"; then
       echo "dapr-heal: the attempt $id was sent to $ns/$owner, but its acknowledgement could not be written to $mark: the next sweep acknowledges it" >&2
       failed=1
     fi
