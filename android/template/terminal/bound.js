@@ -39,6 +39,39 @@ const WORDS = new Set(["shape", "prefab", "color", "target", "clip", "loop"]);
 
 const repeat = (fn, ms) => { const t = setInterval(fn, ms); return () => clearInterval(t); };
 
+/**
+ * The door's flags as one `{key: boolean}`, through the remote evaluation protocol at /ofrep/ on the app's own
+ * origin (the web's first paint asks the same bulk route), with the account's token when the page holds one.
+ * Asked once per process: every bound hatch shares the answer. A door that does not answer, or answers what is
+ * not a list of flags, rejects, and the hatch reports it; it is never read as every flag off.
+ */
+let asked = null;
+export function ofrepFlags() {
+  asked ??= (async () => {
+    let token = null;
+    try {
+      token = JSON.parse(sessionStorage.getItem("pronto-token") || "null")?.token ?? null;
+      const claims = JSON.parse(globalThis.atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+      if (claims.guest === true || !claims.sub) token = null;
+    } catch { token = null; }
+    const r = await fetch("/ofrep/v1/evaluate/flags", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: '{"context":{}}',
+    });
+    if (!r.ok) throw new Error(`flags could not be read: ${r.status}`);
+    const list = (await r.json())?.flags;
+    if (!Array.isArray(list)) throw new Error("flags answered something that is not a list of flags");
+    return Object.fromEntries(list.map((f) => [f.key, f.value === true]));
+  })();
+  const mine = asked;
+  mine.catch(() => { if (asked === mine) asked = null; });
+  return mine;
+}
+
+// The Android terminal's navigator says so (the phone hatch asks the same); anywhere else a bound hatch has no door to ask.
+const defaultFlags = () => (globalThis.navigator?.userAgent === "pronto-android" ? ofrepFlags() : null);
+
 const clone = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
 
 /** The binding checked as the Unity host's HatchBinding.Parse checks it. */
@@ -189,21 +222,32 @@ export function patch(doc, el, node) {
  * @param {object | string} bindingJson
  * @param {Record<string, any>} module
  * @param {{log?: {error: (m: string) => unknown, log: (m: string) => unknown}, css?: string | null,
- *   every?: (fn: () => void, ms: number) => () => void}} [options]
+ *   every?: (fn: () => void, ms: number) => () => void,
+ *   flags?: (() => Promise<Record<string, boolean>> | null)}} [options]
  *   css: the hatch's own stylesheet (android.json hatches.<name>.css), linked while it is mounted.
  *   every: how a ticked hatch is called each frame (setInterval; a test steps it by hand); returns its stop.
+ *   flags: where the module's `ctx.flags` come from, a function returning a promise of `{key: boolean}` (the door's
+ *     flags in the Android terminal, none elsewhere). Only the keys the module lists in its own `export const flags`
+ *     reach it, and the door is asked only when it lists some. Until it answers `ctx.flags` is `{}` and the view is
+ *     drawn again when it does; a rejection is a `PRONTO FAULT` and the flags stay `{}`. `globalThis.__hatchFlags`,
+ *     when set, is what a scenario or a test gives instead (whole, unfiltered), and nothing is asked.
  */
-export function bound(name, bindingJson, module, { log = console, css = null, every = repeat } = {}) {
+export function bound(name, bindingJson, module, { log = console, css = null, every = repeat, flags = defaultFlags } = {}) {
   const binding = bindingOf(bindingJson);
   for (const f of ["init", "view"]) if (typeof module[f] !== "function") throw new Error(`hatch ${name}: the module exports no ${f}`);
   if (binding.hz && typeof module.tick !== "function") throw new Error(`hatch ${name}: a ticked binding needs tick`);
   const fault = (e) => log.error(`PRONTO FAULT hatch ${name}: ${e?.message ?? e}`);
+  // The flags the module reads, by its own `flags` export (a list of keys): only those reach its ctx, so a module that
+  // names none sees `{}` as before, and the door is not asked for it.
+  const wanted = module.flags ?? [];
+  if (!Array.isArray(wanted) || !wanted.every((k) => typeof k === "string")) throw new Error(`hatch ${name}: the module's flags is a list of keys`);
 
   return function mount(screen, { signal } = {}) {
     const doc = screen.ownerDocument;
+    let known = {};
     const ctx = () => {
       const seed = Number.parseInt(new URL(globalThis.location?.href ?? "https://terminal.invalid/").searchParams.get("seed") ?? "0", 10);
-      return { seed: Number.isInteger(seed) ? seed : 0, locale: doc.documentElement.getAttribute("lang") ?? "en", now: Date.now(), flags: globalThis.__hatchFlags ?? {} };
+      return { seed: Number.isInteger(seed) ? seed : 0, locale: doc.documentElement.getAttribute("lang") ?? "en", now: Date.now(), flags: globalThis.__hatchFlags ?? known, host: "android" };
     };
     const mountEl = doc.createElement("div");
     mountEl.setAttribute("id", `hatch-${name}`);
@@ -335,6 +379,14 @@ export function bound(name, bindingJson, module, { log = console, css = null, ev
     draw();
 
     let stopped = false;
+    if (wanted.length && globalThis.__hatchFlags === undefined) {
+      // The door's flags arrive after the first frame; the view is drawn again when they do.
+      Promise.resolve(flags?.()).then((got) => {
+        if (!got || stopped) return;
+        known = Object.fromEntries(wanted.filter((k) => k in got).map((k) => [k, got[k]]));
+        draw();
+      }, (e) => fault(e));
+    }
     const cleanup = () => {
       if (stopped) return;
       stopped = true;

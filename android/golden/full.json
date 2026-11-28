@@ -34,7 +34,7 @@
   "android/gradle.properties": "8b60c3ad6f99f448bda8afb0e7e3b2f9f967624262f2ca123e5e5dcf159f5b46",
   "android/settings.gradle.kts": "17981d5b0c77cd236ca8427aacb1ebcf16040a89c7f276a8d95c50e730f32348",
   "android/sign-release.sh": "071fa518d9146af43c414f029c7cc0fa567e5f369391032c68c8b0d25836b1f8",
-  "android/terminal/bound.js": "9e19458a544f91102174ec9a67afd3a5ed37728bce442dea6c6643da4c644403",
+  "android/terminal/bound.js": "2c85354d66399311b8e18a59db15a871b03cfe085c26ddf949e863042db37643",
   "android/terminal/browser.js": "6180e6b517492a70369a7e61219088329e55675537cd61aafd9a5a121061e83d",
   "android/terminal/bundle.ts": "a772b8c028251a94e662d316ce5001ec5f4b47e30bcab57c7b1764fcae4ef63b",
   "android/terminal/compile.js": "3a8fe969afd43f6855611e5867698fa822a6cea39cacad31e0490b756226f092",
