@@ -1587,6 +1587,51 @@ for bad in ["../rec/flags_spec.cue" "/etc/hosts" "spec/missing.cue" "spec/link.c
 	check ($refused and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-gen | str trim) == $head_before) $"record source: ($bad) is refused, nothing pushed"
 }
 
+# ---- The scratch tree is a fresh checkout: what the app's generate writes and its CUE embeds is not there yet ----
+# brawl-chess's analytics_plugin.cue embeds join/analytics.json, which is gitignored and written by generate: the record's first
+# evaluation of the spec in the scratch tree failed on it, so no flip of that app was ever recorded. The record runs the app's generate
+# when an evaluation finds an embedded file missing, in a scratch tree whose path is physical (macOS's /var is a link to /private/var,
+# and hatch.nu's `path relative-to (pwd)` fails on the two spellings), and the generated file stays out of the pull request.
+for f in [rgh.created rgh.foreign rgh.fork rgh.race rgh.moveref rgh.closedview] { rm -f $"($dir)/($f)" }
+rg fetch -q origin
+rg reset -q --hard origin/main
+let eapp = $"($rwork)/apps/emb"
+mkdir $"($eapp)/join"
+"package emb\n" | save $"($eapp)/program.cue"
+'[tools]
+"github:cue-lang/cue" = "0.16.1"
+' | save $"($eapp)/.mise.toml"
+^$real trust -q $"($eapp)/.mise.toml"
+^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $eapp | ignore
+waive-all $eapp emb
+"/join/\n" | save $"($eapp)/.gitignore"
+# CUE embeds files only inside a module.
+mkdir $"($eapp)/cue.mod"
+"module: \"emb.example\"\nlanguage: version: \"v0.16.1\"\n" | save $"($eapp)/cue.mod/module.cue"
+'@extern(embed)
+
+package emb
+
+joined: _ @embed(file="join/in.json")
+' | save $"($eapp)/embed.cue"
+"{}\n" | save $"($eapp)/join/in.json"
+"package emb\nflagsLive: {dir: \"flagstore\"}\nflags: premium: {default: false, local: true}\n" | save -f $"($eapp)/flags_spec.cue"
+rg add -A
+rg commit -q -m emb
+rg push -q origin HEAD:main
+rg fetch -q origin
+check ((^git -C $rwork ls-files apps/emb/join | is-empty)) "record embed: the embedded file is gitignored, so the scratch tree lacks it"
+rrun [setup $eapp] | ignore
+let embed_gen = 'test "$PWD" = "$(pwd -P)" && mkdir -p join && echo "{}" > join/in.json'
+let e0 = (rrun [push $eapp --flip premium --untested "emb"])
+check ($e0.exit_code == 0 and (open $"($eapp)/flagstore/flags.json" | get flags.premium.variants.default) == true and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "cue export -e flagd.document")) "record embed: with no generate to write it, the record fails on the missing file and the push stands"
+rrun [push $eapp --flip premium=false --untested "emb"] | ignore
+let e1 = (rrun [push $eapp --flip premium --untested "emb"] {PRONTO_FLAGS_GENERATE_CMD: $embed_gen})
+check ($e1.exit_code == 0 and (open $"($eapp)/flagstore/flags.json" | get flags.premium.variants.default) == true) "record embed: the flip is live"
+check ((rjournal | last).record == "pr" and (rjournal | last).flags == "premium") "record embed: the generate wrote the embedded file and the record opened its pull request"
+check ((^git -C $rorigin diff --name-only main fix/flags-record-emb | lines) == ["apps/emb/flags_spec.cue"]) "record embed: the branch changes the spec alone, not the generated file"
+check ((^git -C $rorigin show "fix/flags-record-emb:apps/emb/flags_spec.cue") | str contains "premium: {default: true, local: true}") "record embed: the branch holds the spec with the new default"
+
 # ---- PRONTO-439: a flip needs a production check, or the owner's waiver ----
 # An app with no flags_waive.cue: a flag that goes on needs a `production` scenario naming it (cases of any other kind are cases, not a
 # live check) or `liveWaived` in the spec; --untested answers for cases alone; turning a flag off is never asked.

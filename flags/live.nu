@@ -1475,7 +1475,9 @@ def record-pr [at: record, app: path, version: string, cases: string, want: list
 	let prefix = (git-must (git-in $app rev-parse --show-prefix) "no prefix" | str trim --char "/")
 	let branch = (record-branch $app)
 	git-must (git-in $top fetch -q origin main) "git fetch origin main" | ignore
-	let scratch = (mktemp -d -t flagsrec.XXXXXX)
+	# The physical path: macOS's temporary folder is under /var, a link to /private/var, and a generate that compares
+	# `pwd` with a `path expand`ed file (hatch.nu's path relative-to) fails on the two spellings.
+	let scratch = (mktemp -d -t flagsrec.XXXXXX | path expand)
 	git-must (git-in $top worktree add -q --detach $scratch origin/main) "git worktree add" | ignore
 	let done = try { record-work $at $app $version $cases $want $ctx $top $scratch $prefix $branch } catch {|e| {error: $e.msg} }
 	git-in $top worktree remove --force $scratch | ignore
@@ -1519,10 +1521,20 @@ sys.exit(rc)"'
 	} else { print -e $"flags: record: ($wapp) has no tests/slot.ts, so generate was not run" }
 }
 
+# The spec's flagd.document in the scratch tree. A fresh checkout lacks what the app's generate writes and its CUE embeds
+# (a gitignored file: brawl-chess's join/analytics.json), so an evaluation that finds one missing is made after a generate.
+def record-spec [wapp: path, trust: record]: nothing -> record {
+	try { with-env $trust { cue-of $wapp flagd.document } } catch {|e|
+		if not ($e.msg | str contains "@embed: open") { error make {msg: $e.msg} }
+		record-generate $wapp $trust
+		with-env $trust { cue-of $wapp flagd.document }
+	}
+}
+
 def record-work [at: record, app: path, version: string, cases: string, want: list<record>, ctx: record, top: string, scratch: string, prefix: string, branch: string]: nothing -> record {
 	let wapp = if $prefix == "" { $scratch } else { $scratch | path join $prefix }
 	let trust = {MISE_TRUSTED_CONFIG_PATHS: $scratch}
-	let spec = (with-env $trust { cue-of $wapp flagd.document })
+	let spec = (record-spec $wapp $trust)
 	let diffs = (record-diffs $want $spec)
 	if ($diffs | is-empty) { return {record: "none", flags: "", pr: ""} }
 	let src = (record-source $wapp $trust)
