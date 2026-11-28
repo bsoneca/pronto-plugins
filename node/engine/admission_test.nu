@@ -6,7 +6,7 @@
 # the definitions tenant.nu's check-objects reads, so the first half holds, for each rule, that the policy carries it and that it carries what the schema says
 # (change a list of the schema and the policy moves with it). The second half, with `--kind <kube context>` of a cluster the caller made (kind, the
 # CRDs of CloudNativePG 1.30 installed: `kubectl apply --server-side -f cnpg-1.30.1.yaml`), applies the policies with a Deny binding and asks the API server, as a
-# server-side dry run, whether each object is refused (by which policy) or admitted: a bad object per rule, and the good ones the engine renders. The dry run writes
+# server-side dry run (the ExternalSecret CRDs of external-secrets 0.10.5 are installed when missing), whether each object is refused (by which policy) or admitted: a bad object per rule, and the good ones the engine renders. The dry run writes
 # nothing; the policies, the namespaces and the service accounts it makes are the caller's cluster's to delete.
 
 const engine_dir = path self .
@@ -236,7 +236,11 @@ def test_an_externalsecret_reads_no_store_and_draws_a_password_generator_alone [
 	for k in $tes.noStore { assert ($store | str contains $"!has\(object.spec.($k)\)") $store }
 	let data = (one-rule externalsecrets "no spec.data")
 	for k in $tes.emptyLists { assert ($data | str contains $"size\(object.spec.($k)\) == 0") $data }
+	let spec = (one-rule externalsecrets "sets only the spec keys")
+	for k in $tes.spec { assert ($spec | str contains $"'($k)'") $"($k): ($spec)" }
+	assert ($spec | str contains 'dyn(object.spec)') $spec
 	let from = (one-rule externalsecrets "draw from a generator alone")
+	for w in ['dyn(d)' 'dyn(d.sourceRef)' 'dyn(d.sourceRef.generatorRef)'] { assert ($from | str contains $w) $"($w): ($from)" }
 	for k in ($tes.dataFrom | append $tes.sourceRef | append $tes.generatorRef | append $tes.generatorKinds) { assert ($from | str contains $"'($k)'") $"($k): ($from)" }
 	assert ($from | str contains $"== '($tes.generatorAPIVersion)'") $from
 	# the policy has no way to name a store: none of the words that read one is allowed by a list
@@ -383,7 +387,7 @@ def cases [ns: string]: nothing -> list {
 	let service = {|spec| {apiVersion: v1, kind: Service, metadata: {name: s, namespace: $ns}, spec: ({selector: {a: d}, ports: [{port: 80}]} | merge $spec)} }
 	let cluster = {|spec| {apiVersion: postgresql.cnpg.io/v1, kind: Cluster, metadata: {name: app-db, namespace: $ns}, spec: ({instances: 1, imageName: $base, enableSuperuserAccess: false, postgresUID: 999, postgresGID: 999, storage: {size: 1Gi}, bootstrap: {initdb: {database: app, owner: app}}, postgresql: {parameters: {max_connections: "100", shared_buffers: "256MB", statement_timeout: "30s", wal_level: logical, random_page_cost: "1.1"}}} | merge $spec)} }
 	let policy = "ValidatingAdmissionPolicy"
-	[
+	let rows = [
 		[what obj says];
 		["a pod of the namespace's own image" (do $pod {}) ""]
 		["a pod of an image of its own path pinned by a tag alone" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app:1", securityContext: $safe}]}) pods]
@@ -472,6 +476,27 @@ def cases [ns: string]: nothing -> list {
 		["a Cluster with a managed role that is a plain login" (do $cluster {managed: {roles: [{name: r, login: true}]}}) ""]
 		["a Cluster with a LoadBalancer Service of its own" (do $cluster {managed: {services: {additional: [{selectorType: rw, serviceTemplate: {metadata: {name: lb}, spec: {type: LoadBalancer}}}]}}}) clusters]
 	]
+	$rows | append (externalsecret-cases $ns)
+}
+
+# A tenant's ExternalSecrets as tests/externalsecret says them (PRONTO-2146): the allowed ones are admitted, the refused ones by the externalsecrets policy.
+def externalsecret-cases [ns: string]: nothing -> list {
+	let r = (do { cd ($engine_dir | path join ../..); ^cue export ./node/engine/tests/externalsecret -e $"\(#Cases & {ns: \"($ns)\"})" --out json } | complete)
+	assert equal $r.exit_code 0 $r.stderr
+	let c = ($r.stdout | from json)
+	let allowed = ($c.allowed | transpose name case | each {|t| {what: $"an ExternalSecret that ($t.name)", obj: $t.case.object, says: ""} })
+	let refused = ($c.refused | transpose name case | each {|t| {what: $"an ExternalSecret that ($t.name)", obj: $t.case.object, says: externalsecrets} })
+	$allowed | append $refused
+}
+
+# The ExternalSecret CRDs of the operator version the node runs (#Served: 0.10.5), installed when the cluster has none, as CloudNativePG's are by hand.
+def ensure-eso-crds [context: string]: nothing -> bool {
+	let have = (^kubectl --context $context get crd externalsecrets.external-secrets.io --ignore-not-found -o name | complete)
+	if ($have.stdout | str trim | is-not-empty) { return true }
+	let applied = (^kubectl --context $context apply --server-side --force-conflicts -f https://raw.githubusercontent.com/external-secrets/external-secrets/v0.10.5/deploy/crds/bundle.yaml | complete)
+	if $applied.exit_code != 0 { print $"  \(the ExternalSecret CRDs could not be installed: ($applied.stderr | str trim | str substring 0..200)\)"; return false }
+	^kubectl --context $context wait --for=condition=Established crd/externalsecrets.external-secrets.io --timeout=60s | complete | ignore
+	true
 }
 
 def verdict [r: record]: nothing -> string {
@@ -483,6 +508,8 @@ def test_the_api_server [context: string] {
 	let crd = (^kubectl --context $context get crd clusters.postgresql.cnpg.io --ignore-not-found -o name | complete)
 	let has_cnpg = ($crd.stdout | str trim | is-not-empty)
 	if not $has_cnpg { print "  (no CloudNativePG CRD in the cluster: the Cluster cases are not asked)" }
+	let has_eso = (ensure-eso-crds $context)
+	if not $has_eso { print "  (no ExternalSecret CRD in the cluster: the ExternalSecret cases are not asked)" }
 	let objects = (schema $"\(#TenantAdmission & {label: \"($label)\", name: \"($policy_prefix)\", actions: [\"Deny\"]}).objects")
 	let applied = (kubectl-in $context ({apiVersion: v1, kind: List, items: $objects} | to json) apply --server-side --force-conflicts --field-manager admission-test -f -)
 	assert equal $applied.exit_code 0 $applied.stderr
@@ -510,11 +537,13 @@ def test_the_api_server [context: string] {
 	mut failed = []
 	for c in (cases $tenant_ns) {
 		if (not $has_cnpg) and ($c.obj.kind == Cluster) { continue }
+		if (not $has_eso) and ($c.obj.kind == ExternalSecret) { continue }
 		let got = (verdict (kubectl-in $context ($c.obj | to json) apply --dry-run=server -f -))
 		if $got != $c.says { $failed = ($failed | append $"($c.what): wanted '($c.says)', got '($got)'") }
 	}
 	for c in (cases $plain_ns | where says != "") {
 		if (not $has_cnpg) and ($c.obj.kind == Cluster) { continue }
+		if (not $has_eso) and ($c.obj.kind == ExternalSecret) { continue }
 		let got = (verdict (kubectl-in $context ($c.obj | to json) apply --dry-run=server -f -))
 		if $got != "" { $failed = ($failed | append $"(plain namespace) ($c.what): admitted by no policy, got '($got)'") }
 	}

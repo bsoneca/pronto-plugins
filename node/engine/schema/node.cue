@@ -255,11 +255,12 @@ import (
 // database.logins write it, and nothing that reads a store. An ExternalSecret that names a store (`secretStoreRef`, `data[].remoteRef`, `dataFrom[].extract|find`, `sourceRef.storeRef`)
 // is read by the operator's external-secrets controller with the store's own credentials, so a tenant that names a ClusterSecretStore (or a SecretStore of another namespace's
 // credentials) would copy another tenant's or the operator's secrets into its own namespace. One list, read by the schema's violations, tenant.nu's check-objects and the
-// `-engine-externalsecrets` admission policy: a spec holds no key of `noStore`, no entry in a list of `emptyLists`, and each dataFrom entry holds only the keys of `dataFrom`,
+// `-engine-externalsecrets` admission policy: a spec holds only the keys of `spec`, no key of `noStore`, no entry in a list of `emptyLists`, and each dataFrom entry holds only the keys of `dataFrom`,
 // its sourceRef those of `sourceRef`, its generatorRef those of `generatorRef`, of a kind in `generatorKinds` and (when it says) the `generatorAPIVersion`.
 #TenantExternalSecret: {
 	generatorAPIVersion: "generators.external-secrets.io/v1alpha1"
 	generatorKinds: ["Password"]
+	spec: ["refreshInterval", "target", "data", "dataFrom"]
 	noStore: ["secretStoreRef"]
 	emptyLists: ["data"]
 	dataFrom: ["sourceRef", "rewrite"]
@@ -525,7 +526,10 @@ import (
 					expression: strings.Join([for k in #TenantExternalSecret.emptyLists {"(!has(object.spec.\(k)) || size(object.spec.\(k)) == 0)"}], " && ")
 					message:    "a tenant's ExternalSecret has no spec.data: a lookup in a store is the operator's (#TenantExternalSecret)"
 				}, {
-					expression: "!has(object.spec.dataFrom) || object.spec.dataFrom.all(d, d.all(k, k in [\(strings.Join([for k in #TenantExternalSecret.dataFrom {"'\(k)'"}], ", "))]) && has(d.sourceRef) && d.sourceRef.all(k, k in [\(strings.Join([for k in #TenantExternalSecret.sourceRef {"'\(k)'"}], ", "))]) && has(d.sourceRef.generatorRef) && d.sourceRef.generatorRef.all(k, k in [\(strings.Join([for k in #TenantExternalSecret.generatorRef {"'\(k)'"}], ", "))]) && d.sourceRef.generatorRef.kind in [\(strings.Join([for k in #TenantExternalSecret.generatorKinds {"'\(k)'"}], ", "))] && (!has(d.sourceRef.generatorRef.apiVersion) || d.sourceRef.generatorRef.apiVersion == '\(#TenantExternalSecret.generatorAPIVersion)'))"
+					expression: "dyn(object.spec).all(k, k in [\(strings.Join([for k in #TenantExternalSecret.spec {"'\(k)'"}], ", "))])"
+					message:    "a tenant's ExternalSecret sets only the spec keys of #TenantExternalSecret.spec: a key it does not list reads or writes what the operator's store would"
+				}, {
+					expression: "!has(object.spec.dataFrom) || object.spec.dataFrom.all(d, dyn(d).all(k, k in [\(strings.Join([for k in #TenantExternalSecret.dataFrom {"'\(k)'"}], ", "))]) && has(d.sourceRef) && dyn(d.sourceRef).all(k, k in [\(strings.Join([for k in #TenantExternalSecret.sourceRef {"'\(k)'"}], ", "))]) && has(d.sourceRef.generatorRef) && dyn(d.sourceRef.generatorRef).all(k, k in [\(strings.Join([for k in #TenantExternalSecret.generatorRef {"'\(k)'"}], ", "))]) && d.sourceRef.generatorRef.kind in [\(strings.Join([for k in #TenantExternalSecret.generatorKinds {"'\(k)'"}], ", "))] && (!has(d.sourceRef.generatorRef.apiVersion) || d.sourceRef.generatorRef.apiVersion == '\(#TenantExternalSecret.generatorAPIVersion)'))"
 					message:    "a tenant's ExternalSecret has spec.dataFrom entries that draw from a generator alone (#TenantExternalSecret): no extract, find or storeRef"
 				}]
 			}
@@ -1110,6 +1114,9 @@ import (
 		// PRONTO-2146: a tenant's ExternalSecret reads no store (#TenantExternalSecret); tenant.nu's check-objects and the `-engine-externalsecrets` policy hold the same list.
 		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ for k in #TenantExternalSecret.noStore if o.spec[k] != _|_ {
 			"ExternalSecret/\(o.metadata.name) sets spec.\(k), which names a store: a tenant's ExternalSecret reads none (#TenantExternalSecret)"
+		}],
+		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ for k, _ in o.spec if !list.Contains(#TenantExternalSecret.spec, k) if !list.Contains(#TenantExternalSecret.noStore, k) {
+			"ExternalSecret/\(o.metadata.name) sets spec.\(k), which a tenant's ExternalSecret may not (#TenantExternalSecret)"
 		}],
 		[if publisher for o in _all if o.kind == "ExternalSecret" if o.spec != _|_ for k in #TenantExternalSecret.emptyLists if o.spec[k] != _|_ if len(o.spec[k]) > 0 {
 			"ExternalSecret/\(o.metadata.name) sets spec.\(k), a lookup in a store: a tenant's ExternalSecret reads none (#TenantExternalSecret)"

@@ -82,4 +82,38 @@ package externalsecret
 		"ExternalSecret/steal spec.dataFrom[1] draws from a generator of kind ClusterGenerator, which is no Password (#TenantExternalSecret.generatorKinds)",
 		"ExternalSecret/steal spec.dataFrom[2] draws from a generator of generators.external-secrets.io/v1beta1, not generators.external-secrets.io/v1alpha1 (#TenantExternalSecret)",
 	]
+
+	// upstream pronto's `<app>-auth-secrets` (k8s/schema/k8s.cue prontoExternalSecretObj): no template, two generators renamed, an empty `data`.
+	allowed: "has the shape of upstream's auth-secrets": {
+		name: "app-auth-secrets"
+		object: spec: {
+			refreshInterval: "0"
+			target: {name: "app-auth-secrets", creationPolicy: "Owner"}
+			data: []
+			dataFrom: [{
+				sourceRef: generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: "app-pgrst-jwt-secret"}
+				rewrite: [{regexp: {source: "password", target: "PGRST_JWT_SECRET"}}]
+			}, {
+				sourceRef: generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: "app-electric-secret"}
+				rewrite: [{regexp: {source: "password", target: "ELECTRIC_SECRET"}}]
+			}]
+		}
+	}
+
+	refused: "sets a generatorRef namespace": object: spec: {
+		target: name: "steal"
+		dataFrom: [{sourceRef: generatorRef: {kind: "Password", name: "g", namespace: "other-tenant"}}]
+	}
+	refused: "sets a generatorRef namespace": says: ["ExternalSecret/steal spec.dataFrom[0].sourceRef.generatorRef sets namespace, which a tenant's ExternalSecret may not (#TenantExternalSecret)"]
+	refused: "draws from a generator with no kind": object: spec: {
+		target: name: "steal"
+		dataFrom: [{sourceRef: generatorRef: {name: "g"}}]
+	}
+	refused: "draws from a generator with no kind": says: ["ExternalSecret/steal spec.dataFrom[0] draws from a generator with no kind (#TenantExternalSecret.generatorKinds)"]
+	refused: "sets a spec key outside the allowed ones": object: spec: {
+		refreshPolicy: "OnChange"
+		target: name:  "steal"
+		dataFrom: [{sourceRef: generatorRef: {kind: "Password", name: "g"}}]
+	}
+	refused: "sets a spec key outside the allowed ones": says: ["ExternalSecret/steal sets spec.refreshPolicy, which a tenant's ExternalSecret may not (#TenantExternalSecret)"]
 }

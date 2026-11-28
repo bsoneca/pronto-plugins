@@ -682,6 +682,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			for k in $tes.noStore {
 				if ($es | get -o $k) != null { $why = ($why | append $"($id) sets spec.($k), which names a store: a tenant's ExternalSecret reads none \(#TenantExternalSecret\)") }
 			}
+			for k in (try { $es | columns } catch { [] }) {
+				if $k not-in $tes.spec and $k not-in $tes.noStore { $why = ($why | append $"($id) sets spec.($k), which a tenant's ExternalSecret may not \(#TenantExternalSecret\)") }
+			}
 			for k in $tes.emptyLists {
 				if ($es | get -o $k | default [] | is-not-empty) { $why = ($why | append $"($id) sets spec.($k), a lookup in a store: a tenant's ExternalSecret reads none \(#TenantExternalSecret\)") }
 			}
