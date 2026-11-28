@@ -290,6 +290,11 @@ before PRONTO-758. Studio's `refs/released/studio`, written after `release@k8s` 
 worktree's HEAD does not (Bonk Chess's moves before `mise install` and `release@k8s`, so a drop after the checkout would
 count as released while the old pods still serve; PRONTO-870).
 
+`preview.origin` is either `http://localhost:<port>` (the default, `http://localhost:18080`), reached through `preview.reach`, a
+forward the run starts and kills, which is then required; or a long-lived `https://` origin (scheme, host, optional port: no
+userinfo, path, query or fragment, so `https://rc.bonkchess.com`), already reachable, which has no `reach`. With no `reach` the run
+starts no forward and checks no port: after `up` the probes ask the origin at once, and `down` still runs, always.
+
 ## Install, pause, remove
 
 ```sh

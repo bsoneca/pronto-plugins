@@ -598,7 +598,7 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
+type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach?: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
 let cron!: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string; error: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
@@ -884,7 +884,7 @@ async function previewBody(pv: NonNullable<Command["preview"]>, dir: string, can
   try {
     const up = await child(pv.up[0], pv.up.slice(1), dir, env, undefined, "preview");
     if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
-    else if (!stopped()) {
+    else if (!stopped() && pv.reach) {
       // The port is the forward's alone (cron.js previewPortAddresses): what answers there now is someone else's listener, which the
       // probes would ask in the preview's place. A listener still closing (the kill rehearsal's own forward on the same port) is given
       // 30 s to go; one that stays fails the preview, naming what it answered. Only a refused connection is a free address.
@@ -904,25 +904,27 @@ async function previewBody(pv: NonNullable<Command["preview"]>, dir: string, can
       if (why) bad.push(why);
     }
     if (up.code === 0 && !bad.length && !stopped()) {
+      // No `reach` (a long-lived https origin): nothing to start or wait for, the probes ask the origin itself.
       // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
       // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
-      reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
+      const fwd = pv.reach;
+      if (fwd) reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...fwd], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
       // Answering through the forward: `/` is asked until it answers (the forward takes a moment, as a cold pod's first page does).
       // A forward that exits first (the ssh dropped, the remote port-forward ended) fails the preview: waiting on would hold
       // the app's release lock for ever.
       let gone: Deno.CommandStatus | undefined;
-      reach.status.then((s) => { gone = s; });
+      reach?.status.then((s) => { gone = s; });
       let said2 = 0;
-      for (;;) {
+      for (; fwd;) {
         if (stopped()) break;
         try { const r = await fetch(pv.origin + "/", { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); if (r.status < 500) break; } catch { /* not up yet */ }
-        if (gone) { bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
+        if (gone) { bad.push(`the preview's forward (${fwd!.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
         if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
         await new Promise((r) => setTimeout(r, 5_000));
       }
       // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
       // that other listener, not the preview.
-      if (!bad.length && gone) bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
+      if (!bad.length && fwd && gone) bad.push(`the preview's forward (${fwd!.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
       if (!bad.length) for (const [name, p] of previewProbes(cron.probes)) {
         if (stopped()) break;
         try {
