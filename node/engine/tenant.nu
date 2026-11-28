@@ -645,6 +645,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 	let forbidden_accounts = (schema-export '#TenantForbiddenAccounts')
 	let account_suffix = (schema-export '#TenantAccountSuffix')
 	let guarded_suffixes = (schema-export '#TenantGuardedSecretSuffixes')
+	let tes = (schema-export '#TenantExternalSecret')
 	let cluster_note_prefixes = (schema-export '#TenantRefusedClusterAnnotationPrefixes')
 	let label_prefixes = (schema-export '#TenantRefusedLabelPrefixes')
 	let volume_types = (schema-export '#TenantVolumeTypes')
@@ -672,6 +673,39 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			let sources = ($o.spec?.target?.template?.templateFrom? | default [] | each {|t| $t.secret?.name? | default "" } | where {|n| $n != "" })
 			let held = ($sources | where {|n| $n in $guarded_secrets or ($n | str ends-with $"($node.name? | default '')-db-postgres") or ($guarded_suffixes | any {|x| $n | str ends-with $x }) })
 			if ($held | is-not-empty) { $why = ($why | append $"($id) takes the secret\(s\) ($held | str join ', ') as a template source, which hold the postgres superuser's password: a tenant's ExternalSecret never copies them") }
+		}
+		# PRONTO-2146: and one that reads a store (a ClusterSecretStore or a SecretStore, by spec.secretStoreRef, data, extract, find or sourceRef.storeRef) is read by the operator's
+		# external-secrets controller with the store's own credentials: a tenant's ExternalSecret draws a Password generator's value alone (#TenantExternalSecret, the same list the
+		# schema's violations and the -engine-externalsecrets admission policy hold)
+		if ($o.kind? | default "") == "ExternalSecret" {
+			let es = ($o.spec? | default {})
+			for k in $tes.noStore {
+				if ($es | get -o $k) != null { $why = ($why | append $"($id) sets spec.($k), which names a store: a tenant's ExternalSecret reads none \(#TenantExternalSecret\)") }
+			}
+			for k in $tes.emptyLists {
+				if ($es | get -o $k | default [] | is-not-empty) { $why = ($why | append $"($id) sets spec.($k), a lookup in a store: a tenant's ExternalSecret reads none \(#TenantExternalSecret\)") }
+			}
+			for row in ($es | get -o dataFrom | default [] | enumerate) {
+				let e = $row.item
+				let at = $"($id) spec.dataFrom[($row.index)]"
+				for k in (try { $e | columns } catch { [] }) {
+					if $k not-in $tes.dataFrom { $why = ($why | append $"($at) sets ($k), which a tenant's ExternalSecret may not \(#TenantExternalSecret\)") }
+				}
+				let src = ($e | get -o sourceRef)
+				if $src == null { $why = ($why | append $"($at) has no sourceRef.generatorRef \(#TenantExternalSecret\)"); continue }
+				for k in (try { $src | columns } catch { [] }) {
+					if $k not-in $tes.sourceRef { $why = ($why | append $"($at).sourceRef sets ($k), a store: a tenant's ExternalSecret draws from a generator alone \(#TenantExternalSecret\)") }
+				}
+				let gen = ($src | get -o generatorRef)
+				if $gen == null { $why = ($why | append $"($at).sourceRef has no generatorRef \(#TenantExternalSecret\)"); continue }
+				for k in (try { $gen | columns } catch { [] }) {
+					if $k not-in $tes.generatorRef { $why = ($why | append $"($at).sourceRef.generatorRef sets ($k), which a tenant's ExternalSecret may not \(#TenantExternalSecret\)") }
+				}
+				let kind = ($gen | get -o kind)
+				if $kind == null { $why = ($why | append $"($at) draws from a generator with no kind \(#TenantExternalSecret.generatorKinds\)") } else if $kind not-in $tes.generatorKinds { $why = ($why | append $"($at) draws from a generator of kind ($kind), which is no Password \(#TenantExternalSecret.generatorKinds\)") }
+				let gv = ($gen | get -o apiVersion)
+				if $gv != null and $gv != $tes.generatorAPIVersion { $why = ($why | append $"($at) draws from a generator of ($gv), not ($tes.generatorAPIVersion) \(#TenantExternalSecret\)") }
+			}
 		}
 		# an ExternalSecret that writes its target from a manifest of its own could set what the template cannot
 		if ($o.kind? | default "") == "ExternalSecret" and ($o.spec?.target?.manifest? | default null) != null { $why = ($why | append $"($id) sets spec.target.manifest, which a tenant's release leaves to the operator's store") }

@@ -358,6 +358,7 @@ def main [] {
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	test_a_tenants_retirement_is_the_engines_to_decide
 	test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name
+	test_a_tenants_externalsecret_reads_no_store
 	test_a_tenants_secret_and_seed_names_are_resource_names_never_options
 	test_a_tenants_own_vendored_engine_does_not_copy_the_schema_onto_itself
 	test_a_tenants_schema_that_is_not_a_regular_file_is_refused_unread
@@ -3279,6 +3280,28 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 	assert ($e2e.exit_code != 0) $"a tenant's Node that retires the database was not refused: ($e2e.stdout)"
 	assert (has $e2e.stderr "retire names Cluster/game-db") $e2e.stderr
 	assert equal (writes $w) [] "refused before any write"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_externalsecret_reads_no_store [] {
+	print "test a tenant's ExternalSecret that names a store (a ClusterSecretStore, a SecretStore, data, extract, find or a sourceRef store) is refused as tests/externalsecret says, and a Password generator's value, upstream's db-postgres shape included, passes (PRONTO-2146)..."
+	let w = (tenant-world)
+	let cases = (do { cd ($engine_dir | path join ../..); ^cue export ./node/engine/tests/externalsecret -e '(#Cases & {ns: "ns"})' --out json } | complete)
+	assert equal $cases.exit_code 0 $cases.stderr
+	let cases = ($cases.stdout | from json)
+	let kinds = "[external-secrets.io/v1beta1/ExternalSecret]"
+	assert (($cases.refused | columns | length) >= 5) "the cases of tests/externalsecret were not read"
+	for name in ($cases.refused | columns) {
+		let c = ($cases.refused | get $name)
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: game} ($kinds)")
+		assert ($r.exit_code != 0) $"an ExternalSecret that ($name) was not refused"
+		for says in $c.says { assert (has $r.stderr $says) $"($name): ($says) is not in ($r.stderr)" }
+	}
+	for name in ($cases.allowed | columns) {
+		let c = ($cases.allowed | get $name)
+		let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.object | to nuon)] {namespace: ns, name: game} ($kinds)")
+		assert equal $r.exit_code 0 $"an ExternalSecret that ($name) was refused: ($r.stderr)"
+	}
 	rm -rf $w.dir
 }
 
