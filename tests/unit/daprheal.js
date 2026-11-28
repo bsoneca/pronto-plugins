@@ -12,9 +12,9 @@ const iso = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
 /**
  * Options: `pods`, [{ns, name, owner, containers, init, phase = Running, deleting, ageSec = 3600}]; `injector`, the injector's ready
  * replicas as kubectl prints them ("1", "" for none); `rs`, {"ns/replicaset": "Deployment/name"}; `marks`, {"ns.Deployment.name":
- * minutes since it was rolled}; `failRoll`, workloads whose roll fails; `args`; `cooldown`, `grace`; `namespaces`, the ones swept (aprende and bonk); `failRs`, every ReplicaSet read fails; `readonlyState`, the marks' folder cannot be written; `rollError`, what a failed restart says; `noStateDir`, there is none yet (`stateCreated` says whether the run made it); `attempt`, {"ns/Kind/name": the attempt id the workload's template carries, null for none} (default: `a1` for a workload with a mark, so the mark landed); `markPods`, {mark name: [names of the pods its attempt covered]} (default: every pod given); `failGrep`, the script's grep fails; `oldMarks`, {name: minutes} marks of the older format (empty); `markAttempt`, {name: the id its mark holds}; `markIsDir`, mark names that cannot be read (mode 000); `generation`, {"ns/Kind/name": the workload's generation (default 7)}; `markGeneration`, {mark name: the generation its mark acknowledges, null for none (default 7)}; `patchGeneration` (8), what a patch answers; `rollout`, {"ns/Kind/name": "pending" | "gone" | "unreadable"} for the status read that confirms recovery; `lockError`, flock fails for another reason; `lockHeld`, another sweep holds the lock (`syncs`, what the sweep flushed; `markAges`, minutes since each mark was last written); `uidMismatch`, workloads whose live uid is not the owner reference's; `noDaprTemplate`, workloads whose template does not ask for a sidecar; `failLive`, workload reads fail; `failSort`, sort fails; `extraOut`, raw text the first namespace's pod list ends with (a forged line); `injectorError`, the injector read fails; `live`, {"ns/Kind/name": the pods the workload's selector names when the recovery is confirmed, "phase|containers" lines (default: two Running ones with daprd) or "unreadable" or "expressions"}.
+ * minutes since it was rolled}; `failRoll`, workloads whose roll fails; `args`; `cooldown`, `grace`; `namespaces`, the ones swept (aprende and bonk); `failRs`, every ReplicaSet read fails; `readonlyState`, the marks' folder cannot be written; `rollError`, what a failed restart says; `noStateDir`, there is none yet (`stateCreated` says whether the run made it); `attempt`, {"ns/Kind/name": the attempt id the workload's template carries, null for none} (default: `a1` for a workload with a mark, so the mark landed); `markPods`, {mark name: [names of the pods its attempt covered]} (default: every pod given); `failGrep`, the script's grep fails; `oldMarks`, {name: minutes} marks of the older format (empty); `markAttempt`, {name: the id its mark holds}; `markIsDir`, mark names that cannot be read (mode 000); `generation`, {"ns/Kind/name": the workload's generation (default 7)}; `markGeneration`, {mark name: the generation its mark acknowledges, null for none (default 7)}; `patchGeneration` (8), what a patch answers; `rollout`, {"ns/Kind/name": "pending" | "gone" | "unreadable"} for the status read that confirms recovery; `lockError`, flock fails for another reason; `lockHeld`, another sweep holds the lock (`syncs`, what the sweep flushed; `markAges`, minutes since each mark was last written); `uidMismatch`, workloads whose live uid is not the owner reference's; `noDaprTemplate`, workloads whose template does not ask for a sidecar; `failLive`, workload reads fail; `failSort`, sort fails; `extraOut`, raw text the first namespace's pod list ends with (a forged line); `injectorError`, the injector read fails; `markAttempts`, {mark name: the attempts= its mark holds (none by default)}; `live`, {"ns/Kind/name": the pods the workload's selector names when the recovery is confirmed, "phase|containers" lines (default: two Running ones with daprd) or "unreadable" or "expressions"}.
  */
-export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll = [], args = [], cooldown = 30, grace = 120, namespaces = ['aprende', 'bonk'], rollError = 'the server rejected our request', failRs = false, readonlyState = false, noStateDir = false, attempt = {}, markPods = {}, failGrep = false, oldMarks = {}, markAttempt = {}, markIsDir = [], lockHeld = false, lockError = false, generation = {}, markGeneration = {}, patchGeneration = '8', rollout = {}, uidMismatch = [], noDaprTemplate = [], failLive = false, failSort = false, injectorError = false, extraOut = '', live = {} } = {}) => {
+export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll = [], args = [], cooldown = 30, grace = 120, namespaces = ['aprende', 'bonk'], rollError = 'the server rejected our request', failRs = false, readonlyState = false, noStateDir = false, attempt = {}, markPods = {}, failGrep = false, oldMarks = {}, markAttempt = {}, markIsDir = [], lockHeld = false, lockError = false, generation = {}, markGeneration = {}, patchGeneration = '8', rollout = {}, uidMismatch = [], noDaprTemplate = [], failLive = false, failSort = false, injectorError = false, extraOut = '', live = {}, markAttempts = {} } = {}) => {
   const dir = Deno.makeTempDirSync();
   try {
     const now = Date.now();
@@ -31,7 +31,11 @@ export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll =
     for (const name of Object.keys(marks)) { const [n, kind, ...rest] = name.split('.'); const key = `${n}/${kind}/${rest.join('.')}`; if (!(key in attempt)) attempt[key] = markAttempt[name] ?? ATTEMPT; }
     for (const [w, n] of Object.entries(generation)) Deno.writeTextFileSync(`${dir}/gen.${w.replaceAll('/', '.')}`, String(n));
     for (const [w, st] of Object.entries(rollout)) Deno.writeTextFileSync(`${dir}/rollout.${w.replaceAll('/', '.')}`, st);
-    for (const [w, v] of Object.entries(live)) Deno.writeTextFileSync(`${dir}/live.${w.replaceAll('/', '.')}`, Array.isArray(v) ? v.map((l) => `${l}\n`).join('') : v);
+    for (const [w, v] of Object.entries(live)) {
+      const [, ...wl] = w.split('/'); const own = uidOf(wl.join('/'));
+      Deno.writeTextFileSync(`${dir}/live.${w.replaceAll('/', '.')}`, Array.isArray(v) ? v.map((l) => `${l.replaceAll('@OWN', `@${own}`)}\n`).join('') : v);
+      Deno.writeTextFileSync(`${dir}/uid.${wl.join('.')}`, own);
+    }
     Deno.writeTextFileSync(`${dir}/patchgen`, String(patchGeneration));
     for (const [w, id] of Object.entries(attempt)) Deno.writeTextFileSync(`${dir}/attempt.${w.replaceAll('/', '.')}`, id ?? '');
     Deno.writeTextFileSync(`${dir}/fail`, failRoll.map((f) => `${f}\n`).join(''));
@@ -46,7 +50,7 @@ export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll =
     for (const [name, minutes] of Object.entries(marks)) {
       const at0 = now - minutes * 60000;
       const covered = (markPods[name] ?? pods.map((p) => p.name)).map((n) => uidOf(`pod:${n}`)).join(' ');
-      Deno.writeTextFileSync(`${dir}/state/${name}`, `attempt=${markAttempt[name] ?? ATTEMPT}\npods=${covered}\ntime=${Math.floor(at0 / 1000)}\n${(markGeneration[name] === undefined ? '7' : markGeneration[name]) === null ? '' : `generation=${markGeneration[name] === undefined ? '7' : markGeneration[name]}\n`}`);
+      Deno.writeTextFileSync(`${dir}/state/${name}`, `attempt=${markAttempt[name] ?? ATTEMPT}\npods=${covered}\ntime=${Math.floor(at0 / 1000)}\n${markAttempts[name] === undefined ? '' : `attempts=${markAttempts[name]}\n`}${(markGeneration[name] === undefined ? '7' : markGeneration[name]) === null ? '' : `generation=${markGeneration[name] === undefined ? '7' : markGeneration[name]}\n`}`);
       const at = new Date(now - minutes * 60000);
       Deno.utimeSync(`${dir}/state/${name}`, at, at);
     }
@@ -62,13 +66,13 @@ d=$(dirname "$0")
 echo "$*" >>"$d/calls"
 case "$*" in
   *"get pods -l "*) sel=$(echo "$*" | sed -E 's/.* -l ([^ ]+) .*/\\1/'); kk=$(echo "$sel" | sed -E 's/^app=//'); f="$d/live.$kk"
-    if [ -e "$f" ]; then if [ "$(cat "$f")" = unreadable ]; then echo "the server is not answering" >&2; exit 1; fi; cat "$f"; else printf 'Running|app,daprd,\\nRunning|app,daprd,\\n'; fi ;;
+    if [ -e "$f" ]; then if [ "$(cat "$f")" = unreadable ]; then echo "the server is not answering" >&2; exit 1; fi; awk -F'|' 'NF==2{print $0"|ReplicaSet@x";next}{print}' "$f"; else printf 'Running|app,daprd,|ReplicaSet@x\\nRunning|app,daprd,|ReplicaSet@x\\n'; fi ;;
   *"get pods"*) n=$(echo "$*" | sed -E 's/.*-n ([^ ]+) get pods.*/\\1/'); grep "^$n|" "$d/pods" || true; if [ "$n" = "$(cat "$d/firstns")" ]; then cat "$d/extra"; fi ;;
   *"-n dapr-system get deployment dapr-sidecar-injector"*) if [ -e "$d/injectorerror" ]; then echo "forbidden" >&2; exit 1; fi; printf '%s' "$(cat "$d/injector")" ;;
   *" get Deployment/"* | *" get StatefulSet/"* | *" get DaemonSet/"*)
     ns=$(echo "$*" | sed -E 's/.*-n ([^ ]+) get .*/\\1/'); w=$(echo "$*" | sed -E 's/.* get ([^ ]+) -o.*/\\1/'); key="$ns/$w"; kk=$(echo "$key" | tr / .)
     case "$*" in
-      *matchLabels*) lf="$d/live.$kk"; if [ -e "$lf" ] && [ "$(cat "$lf")" = expressions ]; then printf "(expressions)"; else printf 'app=%s,' "$kk"; fi; exit 0 ;;
+      *matchLabels*) lf="$d/live.$kk"; wu=$(cat "$d/uid.$(echo "$w" | tr / .)" 2>/dev/null); if [ -e "$lf" ] && [ "$(cat "$lf")" = expressions ]; then printf '%s|(expressions)' "$wu"; else printf '%s|app=%s,' "$wu" "$kk"; fi; exit 0 ;;
       *observedGeneration*)
         if [ -e "$d/rollout.$kk" ]; then
           case "$(cat "$d/rollout.$kk")" in
@@ -116,7 +120,8 @@ esac
     let stateCreated = false;
     const markAges = {};
     try { Deno.statSync(`${dir}/state`); stateCreated = true; for (const e of Deno.readDirSync(`${dir}/state`)) { marked.push(e.name); try { markText[e.name] = Deno.readTextFileSync(`${dir}/state/${e.name}`); } catch { /* unreadable */ } markAges[e.name] = Math.round((Date.now() - Deno.statSync(`${dir}/state/${e.name}`).mtime.getTime()) / 60000); } } catch { /* none */ }
-    return { acknowledged: Object.keys(markText).filter((n) => markText[n].includes('generation=')), markText, syncs, markAges, ids, stateCreated, code: r.code, out: dec.decode(r.stdout), err: dec.decode(r.stderr), rolled, marked: marked.sort() };
+    const attempts = Object.fromEntries(Object.entries(markText).map(([n, t]) => [n, Number((t.match(/^attempts=(\d+)$/m) ?? [])[1])]));
+    return { attempts, acknowledged: Object.keys(markText).filter((n) => markText[n].includes('generation=')), markText, syncs, markAges, ids, stateCreated, code: r.code, out: dec.decode(r.stdout), err: dec.decode(r.stderr), rolled, marked: marked.sort() };
   } finally {
     Deno.removeSync(dir, { recursive: true });
   }
